@@ -48,6 +48,18 @@ async fn async_main() {
             )
             .await
         }
+        Actions::Licenses => {
+            println!(
+                "This project is licensed under the Apache-2.0 license, and includes code licensed under the"
+            );
+            println!(
+                "MIT, Apache-2.0, ISC, Unicode-3.0, Unlicense, CDLA-Permissive-2.0, BSD-3-Clause, ZLib, and MPL-2.0 licenses"
+            );
+            println!(
+                "If you wish to look at the exact list of libraries, please head to where this project is hosted, at"
+            );
+            println!("`https://github.com/gabeperson/mineshare` and look at the dependency list.");
+        }
     }
 }
 
@@ -108,4 +120,6 @@ enum Actions {
         #[arg(long)]
         pong_msg: Option<String>,
     },
+    /// List licensing information
+    Licenses,
 }

@@ -1,7 +1,11 @@
 [package]
 name = "mineshare"
 version = "0.1.0"
+description = "A small, no portforwarding reverse proxy app for local Minecraft (and other TCP, including http/https) servers"
+homepage = "https://github.com/gabeperson/mineshare"
+license = "Apache-2.0"
 edition = "2024"
+repository = "https://github.com/gabeperson/mineshare"
 
 [dependencies]
 clap = { version = "4.5.38", features = ["derive"] }
