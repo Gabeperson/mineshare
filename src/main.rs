@@ -8,6 +8,11 @@ async fn main() {
     async_main().await;
 }
 
+const DEFAULT_CONN_ALPN: &str = "mineshare-conn";
+const DEFAULT_PING_ALPN: &str = "mineshare-ping";
+const DEFAULT_PING_MSG: &str = "PING";
+const DEFAULT_PONG_MSG: &str = "PONG";
+
 async fn async_main() {
     let args = Cli::parse();
     match args.action {
@@ -20,10 +25,10 @@ async fn async_main() {
         } => {
             server(
                 server_ip,
-                conn_alpn.as_ref().map_or("mineshare-conn", |alpn| alpn),
-                ping_alpn.as_ref().map_or("mineshare-ping", |alpn| alpn),
-                ping_msg.as_ref().map_or("PING", |msg| msg),
-                pong_msg.as_ref().map_or("PONG", |msg| msg),
+                conn_alpn.as_ref().map_or(DEFAULT_CONN_ALPN, |alpn| alpn),
+                ping_alpn.as_ref().map_or(DEFAULT_PING_ALPN, |alpn| alpn),
+                ping_msg.as_ref().map_or(DEFAULT_PING_MSG, |msg| msg),
+                pong_msg.as_ref().map_or(DEFAULT_PONG_MSG, |msg| msg),
             )
             .await
         }
@@ -41,10 +46,10 @@ async fn async_main() {
                     0,
                 ))),
                 &server_nodeid,
-                conn_alpn.as_ref().map_or("rproxy-conn", |alpn| alpn),
-                ping_alpn.as_ref().map_or("rproxy-ping", |alpn| alpn),
-                ping_msg.as_ref().map_or("PING", |msg| msg),
-                pong_msg.as_ref().map_or("PONG", |msg| msg),
+                conn_alpn.as_ref().map_or(DEFAULT_CONN_ALPN, |alpn| alpn),
+                ping_alpn.as_ref().map_or(DEFAULT_PING_ALPN, |alpn| alpn),
+                ping_msg.as_ref().map_or(DEFAULT_PING_MSG, |msg| msg),
+                pong_msg.as_ref().map_or(DEFAULT_PONG_MSG, |msg| msg),
             )
             .await
         }
