@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Set binary filename
+      id: set-binary-name
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          echo "binary_name=mineshare.exe" >> $GITHUB_ENV
+        elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          echo "binary_name=mineshare" >> $GITHUB_ENV
+        else
+          echo "unknown target"
+          exit 1
+        fi
+
+    - name: Build release
+      run: cargo build --release
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os }}-binary
+        path: target/release/${{env.binary_name}}
+
