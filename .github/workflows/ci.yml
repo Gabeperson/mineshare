@@ -24,7 +24,7 @@ jobs:
       run: |
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
           echo "binary_name=mineshare.exe" >> $GITHUB_ENV
-        elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+        elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
           echo "binary_name=mineshare" >> $GITHUB_ENV
         else
           echo "unknown target"
