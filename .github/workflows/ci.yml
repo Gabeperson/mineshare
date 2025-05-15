@@ -19,17 +19,15 @@ jobs:
 
     - uses: dtolnay/rust-toolchain@stable
 
-    - name: Set binary filename
-      id: set-binary-name
-      run: |
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          echo "binary_name=mineshare.exe" >> $GITHUB_ENV
-        elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-          echo "binary_name=mineshare" >> $GITHUB_ENV
-        else
-          echo "unknown target"
-          exit 1
-        fi
+    - name: Set binary filename (Windows)
+      if: matrix.os == 'windows-latest'
+      run: echo "binary_name=mineshare.exe" >> $GITHUB_ENV
+      shell: pwsh
+
+    - name: Set binary filename (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: echo "binary_name=mineshare" >> $GITHUB_ENV
+      shell: bash
 
     - name: Build release
       run: cargo build --release
