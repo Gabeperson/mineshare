@@ -1,7 +1,7 @@
 use clap::{Parser, clap_derive::*};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use mineshare::{client, server};
+use mineshare::{client::client, server::server};
 
 #[tokio::main]
 async fn main() {
@@ -23,12 +23,30 @@ async fn async_main() {
             ping_msg,
             pong_msg,
         } => {
+            let (errsend, mut errrecv) = tokio::sync::mpsc::channel(100);
+            let (evsend, mut evrecv) = tokio::sync::mpsc::channel(100);
+            tokio::task::spawn(async move {
+                loop {
+                    while let Some(recv) = evrecv.recv().await {
+                        println!("{}", recv);
+                    }
+                }
+            });
+            tokio::task::spawn(async move {
+                loop {
+                    while let Some(recv) = errrecv.recv().await {
+                        println!("{}", recv);
+                    }
+                }
+            });
             server(
                 server_ip,
                 conn_alpn.as_ref().map_or(DEFAULT_CONN_ALPN, |alpn| alpn),
                 ping_alpn.as_ref().map_or(DEFAULT_PING_ALPN, |alpn| alpn),
                 ping_msg.as_ref().map_or(DEFAULT_PING_MSG, |msg| msg),
                 pong_msg.as_ref().map_or(DEFAULT_PONG_MSG, |msg| msg),
+                evsend,
+                errsend,
             )
             .await
         }
@@ -40,7 +58,24 @@ async fn async_main() {
             ping_msg,
             pong_msg,
         } => {
-            client(
+            let (errsend, mut errrecv) = tokio::sync::mpsc::channel(100);
+            let (evsend, mut evrecv) = tokio::sync::mpsc::channel(100);
+            tokio::task::spawn(async move {
+                loop {
+                    while let Some(recv) = evrecv.recv().await {
+                        println!("{}", recv);
+                    }
+                }
+            });
+            tokio::task::spawn(async move {
+                loop {
+                    while let Some(recv) = errrecv.recv().await {
+                        println!("{}", recv);
+                    }
+                }
+            });
+            let errsend2 = errsend.clone();
+            match client(
                 listener_ip.unwrap_or(SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(127, 0, 0, 1),
                     0,
@@ -50,8 +85,16 @@ async fn async_main() {
                 ping_alpn.as_ref().map_or(DEFAULT_PING_ALPN, |alpn| alpn),
                 ping_msg.as_ref().map_or(DEFAULT_PING_MSG, |msg| msg),
                 pong_msg.as_ref().map_or(DEFAULT_PONG_MSG, |msg| msg),
+                evsend,
+                errsend,
             )
             .await
+            {
+                Ok(()) => (),
+                Err(e) => {
+                    errsend2.send(e).await.unwrap();
+                }
+            }
         }
         Actions::Licenses => {
             println!(
