@@ -1,3 +1,4 @@
+mod wordlist;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
