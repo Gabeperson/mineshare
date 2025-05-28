@@ -1,0 +1,19 @@
+[package]
+name = "mineshare2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+governor = "0.10.0"
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+url = "2.5.4"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+
