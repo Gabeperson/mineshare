@@ -53,6 +53,86 @@ async fn async_main() {
         }
     };
     let base_domain2 = base_domain.clone();
+    tokio::task::spawn(async move {
+        loop {
+            let accepted = client_listener.accept().await.expect("Failed to listen");
+            tokio::task::spawn(async move {
+                let (mut stream, socketaddr) = accepted;
+                let mut data = vec![0u8; 2048];
+                let mut cursor = 0;
+                let fut = async {
+                    loop {
+                        match stream.read(&mut data[cursor..]).await {
+                            Ok(v) => {
+                                cursor += v;
+                            }
+                            Err(_e) => {
+                                return Err(());
+                            }
+                        };
+                        let mut inner_cursor = 0;
+                        let (_len, read) = match varint::decode_varint(&data[..cursor]) {
+                            Ok(Some(res)) => res,
+                            Ok(None) => continue,
+                            Err(_e) => {
+                                return Err(());
+                            }
+                        };
+                        inner_cursor += read;
+                        let (packet_id, read) =
+                            match varint::decode_varint(&data[inner_cursor..cursor]) {
+                                Ok(Some(res)) => res,
+                                Ok(None) => continue,
+                                Err(_e) => {
+                                    return Err(());
+                                }
+                            };
+                        inner_cursor += read;
+                        if packet_id != 0 {
+                            // Handshaking protocol ID should be 0
+                            return Err(());
+                        }
+                        let (_protocol_id, read) =
+                            match varint::decode_varint(&data[inner_cursor..cursor]) {
+                                Ok(Some(res)) => res,
+                                Ok(None) => continue,
+                                Err(_e) => {
+                                    return Err(());
+                                }
+                            };
+                        inner_cursor += read;
+                        let (strlen, read) =
+                            match varint::decode_varint(&data[inner_cursor..cursor]) {
+                                Ok(Some(res)) => res,
+                                Ok(None) => continue,
+                                Err(_e) => {
+                                    return Err(());
+                                }
+                            };
+                        inner_cursor += read;
+                        if data[inner_cursor..cursor].len() < strlen as usize {
+                            continue;
+                        }
+                        let hostname =
+                            data[inner_cursor..inner_cursor + strlen as usize].to_owned();
+                        let access = if let Some(hostname) =
+                            hostname.strip_suffix(base_domain2.as_bytes())
+                        {
+                            if hostname.len() == 0 {
+                                return Err(());
+                            }
+                            hostname
+                        } else {
+                            return Err(());
+                        };
+                        // TODO look up in the hashmap and see if exist, if so then send to there
+                    }
+                };
+                let timeout = tokio::time::timeout(Duration::from_secs(15), fut);
+            });
+        }
+    });
+    let base_domain2 = base_domain.clone();
     let map2 = map.clone();
     tokio::task::spawn(async move {
         let map = map2;

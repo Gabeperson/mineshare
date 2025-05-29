@@ -8,9 +8,9 @@ anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
 futures = "0.3.31"
 governor = "0.10.0"
+idna = "1.0.3"
 rand = "0.9.1"
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
-url = "2.5.4"
 
 [[bin]]
 name = "server"
