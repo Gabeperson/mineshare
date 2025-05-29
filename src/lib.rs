@@ -22,6 +22,7 @@ use tokio::net::TcpStream;
 
 pub const RECV_BUF_SIZE: usize = 256 * 1024;
 pub const TIMEOUT_DURATION_SECS: f32 = 15.;
+pub const SEND_AMT: usize = 8 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum Message<'a> {
@@ -146,18 +147,18 @@ pub struct SingleRecvConn {
 }
 
 impl SingleRecvConn {
-    pub fn recv(&mut self) -> ConnReceiveDataFuture {
-        ConnReceiveDataFuture { client: Some(self) }
+    pub fn recv(&mut self) -> SingleConnReceiveDataFuture {
+        SingleConnReceiveDataFuture { client: Some(self) }
     }
 }
 
 #[derive(Debug)]
-pub struct ConnReceiveDataFuture<'a> {
+pub struct SingleConnReceiveDataFuture<'a> {
     // Lifetime workaround
     client: Option<&'a mut SingleRecvConn>,
 }
 
-impl<'a> Future for ConnReceiveDataFuture<'a> {
+impl<'a> Future for SingleConnReceiveDataFuture<'a> {
     type Output = (Result<&'a [u8], std::io::Error>, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -259,6 +260,7 @@ pub struct RecvBuffer {
     pub start: usize,
     // If usize::MAX, then empty
     pub end: usize,
+    pub waiting_for_send: usize,
 }
 impl Default for RecvBuffer {
     fn default() -> Self {
@@ -271,6 +273,7 @@ impl RecvBuffer {
             inner: [0; RECV_BUF_SIZE],
             start: 0,
             end: usize::MAX,
+            waiting_for_send: 0,
         }
     }
     pub fn len(&self) -> usize {
@@ -289,9 +292,51 @@ impl RecvBuffer {
     pub fn available(&self) -> usize {
         RECV_BUF_SIZE - self.len()
     }
+    pub fn wrote(&mut self, amt: usize) {
+        self.waiting_for_send -= amt;
+        self.start += amt;
+        self.start %= RECV_BUF_SIZE;
+        if self.start == self.end {
+            self.end = usize::MAX;
+        }
+    }
 }
 
-pub struct MultiRecvConn {
+#[derive(Debug)]
+pub struct MultiRecvBuf {
     limiter: Arc<Limiter>,
     buf: RecvBuffer,
+    id: usize,
+}
+
+#[derive(Debug)]
+pub struct MultiRecvBufFuture<'a> {
+    // Lifetime workaround
+    conn: Option<&'a mut MultiRecvBuf>,
+}
+
+impl<'a> Future for MultiRecvBufFuture<'a> {
+    type Output = usize;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let conn = self.conn.take().unwrap();
+        let len = conn.buf.waiting_for_send;
+        if len == 0 {
+            // if there's nothing to transfer, we don't have anything to do :)
+            return Poll::Pending;
+        }
+        let fut = conn
+            .limiter
+            // We just cast the len, because the max length of the buffer will NEVER be > 4gb.
+            .until_n_ready(NonZeroU32::new(len as u32).unwrap());
+        let fut = pin!(fut);
+        match fut.poll(cx) {
+            Poll::Ready(res) => {
+                // Since we use small buffer this should always succeed
+                debug_assert!(res.is_ok());
+                Poll::Ready(conn.id)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }

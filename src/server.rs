@@ -97,7 +97,7 @@ async fn server_handler(
             clients
                 .iter_mut()
                 .map(|client| client.recv())
-                .collect::<FuturesUnordered<ConnReceiveDataFuture<'_>>>(),
+                .collect::<FuturesUnordered<SingleConnReceiveDataFuture<'_>>>(),
         );
     }
 }
