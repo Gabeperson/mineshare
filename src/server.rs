@@ -1,21 +1,13 @@
 use anyhow::Result;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, pin_mut};
-use governor::RateLimiter;
-use governor::clock::DefaultClock;
-use governor::middleware::NoOpMiddleware;
-use governor::state::{InMemoryState, NotKeyed};
 use mineshare::*;
-use rand::Rng as _;
 use rand::seq::IndexedRandom;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
-use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
-use tokio::io::{AsyncRead as _, AsyncWriteExt as _, ReadBuf};
+use tokio::io::AsyncReadExt as _;
+use tokio::io::AsyncWriteExt;
+use tokio::select;
 use tokio::time::Instant;
 
 use clap::Parser;
@@ -66,11 +58,13 @@ async fn async_main() {
             tokio::task::spawn(async move {
                 let res = server_handler(stream, addr, map, base_domain).await;
                 if let Err(e) = res {
-                    eprintln!("Server handler returned error: {e}");
+                    eprintln!("Server exited with error: {e}");
                 }
             });
         }
     });
+
+    tokio::signal::ctrl_c().await.unwrap();
 }
 
 async fn server_handler(
@@ -79,6 +73,7 @@ async fn server_handler(
     map: Arc<RwLock<HashMap<Vec<u8>, Sender<TcpStream>>>>,
     base_domain: Arc<str>,
 ) -> Result<()> {
+    println!("{addr} connected");
     let mut prefix = {
         let locked = map.read().await;
         get_random_prefix(&locked)
@@ -88,11 +83,17 @@ async fn server_handler(
     let url = prefix;
     Message::DomainDecided(&url).encode(&mut stream).await?;
 
+    let mut map: HashMap<u64, usize> = HashMap::new();
     let mut clients: Vec<SingleRecvConn> = Vec::new();
     let mut recv_buffer_limits: Vec<RecvMux> = Vec::new();
     let mut timeout_time = Instant::now() + Duration::from_secs_f32(TIMEOUT_DURATION_SECS);
     let mut index_client = 0;
     let mut index_multi = 0;
+    let mut recv_buf = Box::new([0u8; MUX_RECV_BUF_SIZE]);
+    let mut recv_buf_idx = 0;
+
+    // TODO channel to send the things here
+    // TODO timeout
 
     loop {
         let client_fut = ArrayPollSingle {
@@ -104,6 +105,100 @@ async fn server_handler(
             index: Some(&mut index_multi),
         };
         let heartbeat = tokio::time::sleep(Duration::from_secs_f32(TIMEOUT_DURATION_SECS));
+        let read_server = stream.read(&mut recv_buf[recv_buf_idx..]);
+        select!(
+            (res, index) = client_fut => {
+                match res {
+                    Ok(len) => {
+                        if len == 0 {
+                            // Connection reached EOF. So we close.
+                            Message::Disconnect(index as u64).encode(&mut stream).await?;
+                            clients.swap_remove(index);
+                            recv_buffer_limits.swap_remove(index);
+                            map = clients.iter().enumerate().map(|(index, client)| {
+                                (client.id, index)
+                            }).collect();
+                        }
+                        stream.write_all(&clients[index].buf[..len]).await?;
+                    },
+                    Err(_e) => {
+                        // This connection errored, tell the other side and remove them
+                        Message::Disconnect(index as u64).encode(&mut stream).await?;
+                        clients.swap_remove(index);
+                        recv_buffer_limits.swap_remove(index);
+                        map = clients.iter().enumerate().map(|(index, client)| {
+                            (client.id, index)
+                        }).collect();
+                    },
+                }
+            }
+            (send_amt, index) = recv_fut => {
+                let client = &mut clients[index];
+                let recvmux = &mut recv_buffer_limits[index];
+                let buf = &recvmux.buf.inner[..send_amt];
+                match client.stream.write(buf).await {
+                    Ok(written) => {
+                        recvmux.buf.wrote(written);
+                        Message::Acknowledged(send_amt as u64).encode(&mut stream).await?;
+                    },
+                    Err(_e) => {
+                        // This connection errored, tell the other side and remove them
+                        Message::Disconnect(index as u64).encode(&mut stream).await?;
+                        clients.swap_remove(index);
+                        recv_buffer_limits.swap_remove(index);
+                        map = clients.iter().enumerate().map(|(index, client)| {
+                            (client.id, index)
+                        }).collect();
+                    },
+                }
+            }
+            _ = heartbeat => {
+                Message::HeartBeat.encode(&mut stream).await?
+            }
+            read_amt = read_server => {
+                let read_amt = read_amt?;
+                match Message::decode(&recv_buf[..recv_buf_idx+read_amt]) {
+                    Ok(msg) => {
+                        let read: usize;
+                        match msg {
+                            (Message::DomainDecided(_) | Message::Connect(_) | Message::Acknowledged(_), _read) => {
+                                anyhow::bail!("Invalid messages for client server to send.")
+                            }
+                            (Message::Disconnect(id), read_amt) => {
+                                let index = *map.get(&id).unwrap();
+                                clients.swap_remove(index);
+                                recv_buffer_limits.swap_remove(index);
+                                map = clients.iter().enumerate().map(|(index, client)| {
+                                    (client.id, index)
+                                }).collect();
+                                read = read_amt;
+                            },
+                            (Message::Data(id, data), read_amt) => {
+                                let index = *map.get(&id).unwrap();
+                                let client_buf = &mut recv_buffer_limits[index];
+                                if client_buf.buf.available() < data.len() {
+                                    anyhow::bail!("Server sent too much data")
+                                }
+                                client_buf.buf.write(data);
+                                read = read_amt;
+                            }
+                            (Message::HeartBeat, read_amt) => {
+                                read = read_amt;
+                            }
+                        }
+                        recv_buf.copy_within(read.., 0);
+                        recv_buf_idx = 0;
+                    },
+                    Err(DecodeStatus::NeedMoreData) => {
+                        // Need more data, so we just update the cursor and continue.
+                        recv_buf_idx += read_amt;
+                    },
+                    Err(DecodeStatus::Error(e)) => {
+                        return Err(e.into());
+                    }
+                }
+            }
+        )
     }
 }
 

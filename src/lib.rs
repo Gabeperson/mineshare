@@ -5,22 +5,20 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
 
-use futures::StreamExt;
 use futures::pin_mut;
-use futures::stream::FuturesUnordered;
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::middleware::NoOpMiddleware;
 use governor::state::InMemoryState;
 use governor::state::NotKeyed;
 use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
-pub const RECV_BUF_SIZE: usize = 256 * 1024;
+pub const RECV_BUF_SIZE: usize = 512 * 1024;
+pub const MUX_RECV_BUF_SIZE: usize = 512 * 1024 + 1024;
 pub const TIMEOUT_DURATION_SECS: f32 = 15.;
 pub const SEND_AMT: usize = 8 * 1024;
 
@@ -29,9 +27,30 @@ pub enum Message<'a> {
     DomainDecided(&'a [u8]),
     Disconnect(u64),
     Connect(u64),
-    Data(&'a [u8]),
+    Data(u64, &'a [u8]),
     HeartBeat,
     Acknowledged(u64),
+}
+
+#[derive(Debug)]
+pub enum DecodeStatus {
+    NeedMoreData,
+    Error(std::io::Error),
+}
+
+trait ToDecodeFailure: Sized {
+    type Output;
+    fn or_need_more_data(self) -> Result<Self::Output, DecodeStatus>;
+}
+
+impl<T> ToDecodeFailure for Option<T> {
+    type Output = T;
+    fn or_need_more_data(self) -> Result<T, DecodeStatus> {
+        match self {
+            Some(v) => Ok(v),
+            None => Err(DecodeStatus::NeedMoreData),
+        }
+    }
 }
 
 impl<'a> Message<'a> {
@@ -40,7 +59,7 @@ impl<'a> Message<'a> {
             Message::DomainDecided(_) => 0,
             Message::Disconnect(_) => 1,
             Message::Connect(_) => 2,
-            Message::Data(_) => 3,
+            Message::Data(_, _) => 3,
             Message::HeartBeat => 4,
             Message::Acknowledged(_) => 5,
         }
@@ -58,7 +77,9 @@ impl<'a> Message<'a> {
                 writer.write_u64(n).await?;
                 Ok(())
             }
-            Message::Data(bytes) => {
+            Message::Data(id, bytes) => {
+                let (buf, len) = varint::encode_varint(id);
+                writer.write_all(&buf[..len]).await?;
                 let (buf, len) = varint::encode_varint(bytes.len() as u64);
                 writer.write_all(&buf[..len]).await?;
                 writer.write_all(bytes).await?;
@@ -67,45 +88,76 @@ impl<'a> Message<'a> {
             Message::HeartBeat => Ok(()),
         }
     }
-    pub async fn decode<S: AsyncRead + Unpin>(
-        reader: &mut S,
-        buf: &'a mut [u8],
-    ) -> Result<Message<'a>, std::io::Error> {
-        let discriminant = reader.read_u8().await?;
+    pub fn decode(buf: &'a [u8]) -> Result<(Message<'a>, usize), DecodeStatus> {
+        let mut cursor = 0;
+        let discriminant = buf.get(cursor).or_need_more_data()?;
+        cursor += 1;
         match discriminant {
             0 => {
-                let len = varint::decode_varint(reader).await? as usize;
+                let (len, read) = varint::decode_varint(&buf[cursor..])?;
+                let len = len as usize;
+                cursor += read;
+                // Domain should not be >= 512 bytes
                 if len >= 512 {
-                    return Err(std::io::ErrorKind::OutOfMemory.into());
+                    return Err(DecodeStatus::Error(std::io::ErrorKind::OutOfMemory.into()));
                 }
-                let _len = reader.read_exact(&mut buf[..len]).await?;
-                Ok(Message::DomainDecided(&buf[..len]))
+                if let Some(slice) = buf.get(cursor..cursor + len) {
+                    Ok((Message::DomainDecided(slice), cursor + len))
+                } else {
+                    Err(DecodeStatus::NeedMoreData)
+                }
             }
             1 => {
-                let id = reader.read_u64().await?;
-                Ok(Message::Disconnect(id))
+                if let Some(n) = buf.get(cursor..cursor + 8) {
+                    return Ok((
+                        Message::Disconnect(u64::from_be_bytes(n.try_into().unwrap())),
+                        cursor + 8,
+                    ));
+                }
+                Err(DecodeStatus::NeedMoreData)
             }
             2 => {
-                let id = reader.read_u64().await?;
-                Ok(Message::Connect(id))
+                if let Some(n) = buf.get(cursor..cursor + 8) {
+                    return Ok((
+                        Message::Connect(u64::from_be_bytes(n.try_into().unwrap())),
+                        cursor + 8,
+                    ));
+                }
+                Err(DecodeStatus::NeedMoreData)
             }
             3 => {
-                let len = varint::decode_varint(reader).await? as usize;
+                let (id, read) = varint::decode_varint(&buf[cursor..])?;
+                cursor += read;
+                let (len, read) = varint::decode_varint(&buf[cursor..])?;
+                let len = len as usize;
+                cursor += read;
                 if len >= RECV_BUF_SIZE {
-                    return Err(std::io::ErrorKind::OutOfMemory.into());
+                    return Err(DecodeStatus::Error(std::io::ErrorKind::OutOfMemory.into()));
                 }
-                let _len = reader.read_exact(&mut buf[..len as usize]).await?;
-                Ok(Message::DomainDecided(&buf[..len as usize]))
+                if let Some(slice) = buf.get(cursor..cursor + len) {
+                    Ok((Message::Data(id, slice), cursor + len))
+                } else {
+                    Err(DecodeStatus::NeedMoreData)
+                }
             }
-            4 => Ok(Message::HeartBeat),
-            _ => Err(std::io::ErrorKind::InvalidData.into()),
+            4 => Ok((Message::HeartBeat, 1)),
+            5 => {
+                if let Some(n) = buf.get(cursor..cursor + 8) {
+                    return Ok((
+                        Message::Acknowledged(u64::from_be_bytes(n.try_into().unwrap())),
+                        cursor + 8,
+                    ));
+                }
+                Err(DecodeStatus::NeedMoreData)
+            }
+            _ => Err(DecodeStatus::Error(std::io::ErrorKind::InvalidData.into())),
         }
     }
 }
 
 pub mod varint {
-    use tokio::io::AsyncRead;
-    use tokio::io::AsyncReadExt;
+
+    use crate::DecodeStatus;
 
     pub fn encode_varint(mut value: u64) -> ([u8; 10], usize) {
         let mut index = 0;
@@ -120,18 +172,17 @@ pub mod varint {
         (buf, index)
     }
 
-    pub async fn decode_varint<S: AsyncRead + Unpin>(
-        reader: &mut S,
-    ) -> Result<u64, std::io::Error> {
+    pub fn decode_varint(buf: &[u8]) -> Result<(u64, usize), DecodeStatus> {
+        use super::ToDecodeFailure;
         let mut result = 0;
         for i in 0..10 {
-            let byte = reader.read_u8().await?;
+            let byte = *buf.get(i).or_need_more_data()?;
             result |= ((byte & 0x7f) as u64) << (7 * i);
             if byte & 0x80 == 0 {
-                return Ok(result);
+                return Ok((result, i + 1));
             }
         }
-        Err(std::io::ErrorKind::InvalidData.into())
+        Err(DecodeStatus::Error(std::io::ErrorKind::InvalidData.into()))
     }
 }
 
@@ -143,7 +194,7 @@ pub struct SingleRecvConn {
     pub limiter: Arc<Limiter>,
     pub buf: Box<[u8; 8096]>,
     pub buf_filled: Option<NonZeroU32>,
-    pub id: usize,
+    pub id: u64,
 }
 
 impl SingleRecvConn {
@@ -159,7 +210,7 @@ pub struct SingleConnReceiveDataFuture<'a> {
 }
 
 impl<'a> Future for SingleConnReceiveDataFuture<'a> {
-    type Output = (Result<usize, std::io::Error>, usize);
+    type Output = Result<usize, std::io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let client = self.client.take().unwrap();
@@ -181,7 +232,7 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                 // multiplexed stream has enough quota to receive
                 client.buf_filled = None;
                 let n = n.get() as usize;
-                Poll::Ready((Ok(n), client.id))
+                Poll::Ready(Ok(n))
             }
             None => {
                 let filled = {
@@ -192,7 +243,7 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                         Poll::Ready(v) => {
                             if let Err(e) = v {
                                 // The TCP connection disconnected, bubble up to handle it
-                                return Poll::Ready((Err(e), client.id));
+                                return Poll::Ready(Err(e));
                             }
                             buffer.filled_mut().len()
                         }
@@ -203,7 +254,7 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                 let filled = filled as u32; // We use an 8KB buffer so it's impossible for this to get above u32 limit.
                 if filled == 0 {
                     // EOF, pass it on
-                    return Poll::Ready((Ok(0), client.id));
+                    return Poll::Ready(Ok(0));
                 }
                 let filled = NonZeroU32::new(filled).unwrap();
                 let fut = client.limiter.until_n_ready(filled);
@@ -221,7 +272,7 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                     }
                 }
                 // We have data, and have enough quota to send it!
-                Poll::Ready((Ok(filled.get() as usize), client.id))
+                Poll::Ready(Ok(filled.get() as usize))
             }
         }
     }
@@ -245,7 +296,7 @@ impl<'a> Future for ArrayPollSingle<'a> {
                 let fut = arr[*index].recv();
                 let fut = pin!(fut);
                 match fut.poll(cx) {
-                    Poll::Ready(res) => return Poll::Ready(res),
+                    Poll::Ready(res) => return Poll::Ready((res, *index)),
                     Poll::Pending => {}
                 }
                 *index += 1;
@@ -259,10 +310,7 @@ impl<'a> Future for ArrayPollSingle<'a> {
 #[derive(Debug)]
 pub struct RecvBuffer {
     pub inner: [u8; RECV_BUF_SIZE],
-    pub start: usize,
-    // If usize::MAX, then empty
     pub end: usize,
-    pub waiting_for_send: usize,
 }
 impl Default for RecvBuffer {
     fn default() -> Self {
@@ -273,20 +321,11 @@ impl RecvBuffer {
     pub fn new() -> Self {
         Self {
             inner: [0; RECV_BUF_SIZE],
-            start: 0,
-            end: usize::MAX,
-            waiting_for_send: 0,
+            end: 0,
         }
     }
     pub fn len(&self) -> usize {
-        if self.end == usize::MAX {
-            return 0;
-        }
-        let len = (self.end + RECV_BUF_SIZE - self.start) % RECV_BUF_SIZE;
-        if len == 0 {
-            return RECV_BUF_SIZE;
-        }
-        len
+        self.end - 1
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -294,21 +333,28 @@ impl RecvBuffer {
     pub fn available(&self) -> usize {
         RECV_BUF_SIZE - self.len()
     }
-    pub fn wrote(&mut self, amt: usize) {
-        self.waiting_for_send -= amt;
-        self.start += amt;
-        self.start %= RECV_BUF_SIZE;
-        if self.start == self.end {
-            self.end = usize::MAX;
-        }
+    pub fn to_write(&self) -> usize {
+        self.len().min(8096)
+    }
+    pub fn remaining(&self) -> usize {
+        self.len() - self.to_write()
+    }
+    pub fn wrote(&mut self, bytes: usize) {
+        let remaining = self.remaining();
+        self.inner.copy_within(bytes..bytes + remaining, 0);
+        self.end = remaining;
+    }
+    pub fn write(&mut self, slice: &[u8]) {
+        self.inner[self.end..self.end + slice.len()].copy_from_slice(slice);
+        self.end += slice.len();
     }
 }
 
 #[derive(Debug)]
 pub struct RecvMux {
-    limiter: Arc<Limiter>,
-    buf: RecvBuffer,
-    id: usize,
+    pub limiter: Arc<Limiter>,
+    pub buf: RecvBuffer,
+    pub id: usize,
 }
 
 #[derive(Debug)]
@@ -322,15 +368,16 @@ impl<'a> Future for RecvMuxFuture<'a> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let conn = self.conn.take().unwrap();
-        let len = conn.buf.waiting_for_send;
+        let len = conn.buf.len();
         if len == 0 {
             // if there's nothing to transfer, we don't have anything to do :)
             return Poll::Pending;
         }
+        let to_write = conn.buf.to_write();
         let fut = conn
             .limiter
             // We just cast the len, because the max length of the buffer will NEVER be > 4gb.
-            .until_n_ready(NonZeroU32::new(len as u32).unwrap());
+            .until_n_ready(NonZeroU32::new(to_write as u32).unwrap());
         let fut = pin!(fut);
         match fut.poll(cx) {
             Poll::Ready(res) => {
@@ -350,7 +397,7 @@ pub struct ArrayPollMux<'a> {
 }
 
 impl<'a> Future for ArrayPollMux<'a> {
-    type Output = usize;
+    type Output = (usize, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let arr = self.arr.take().unwrap();
@@ -364,7 +411,7 @@ impl<'a> Future for ArrayPollMux<'a> {
                 let fut = pin!(fut);
                 // blocked on https://github.com/rust-lang/rust/issues/54663
                 match fut.poll(cx) {
-                    Poll::Ready(res) => return Poll::Ready(res),
+                    Poll::Ready(res) => return Poll::Ready((res, *index)),
                     Poll::Pending => {}
                 }
                 *index += 1;
