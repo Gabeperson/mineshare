@@ -89,16 +89,21 @@ async fn server_handler(
     Message::DomainDecided(&url).encode(&mut stream).await?;
 
     let mut clients: Vec<SingleRecvConn> = Vec::new();
-    let mut recv_buffer_limits: Vec<()> = Vec::new();
+    let mut recv_buffer_limits: Vec<RecvMux> = Vec::new();
     let mut timeout_time = Instant::now() + Duration::from_secs_f32(TIMEOUT_DURATION_SECS);
+    let mut index_client = 0;
+    let mut index_multi = 0;
 
     loop {
-        let client_fut = PendingIfZero::new(
-            clients
-                .iter_mut()
-                .map(|client| client.recv())
-                .collect::<FuturesUnordered<SingleConnReceiveDataFuture<'_>>>(),
-        );
+        let client_fut = ArrayPollSingle {
+            arr: Some(&mut clients),
+            index: Some(&mut index_client),
+        };
+        let recv_fut = ArrayPollMux {
+            arr: Some(&mut recv_buffer_limits),
+            index: Some(&mut index_multi),
+        };
+        let heartbeat = tokio::time::sleep(Duration::from_secs_f32(TIMEOUT_DURATION_SECS));
     }
 }
 

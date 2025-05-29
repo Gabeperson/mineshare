@@ -159,7 +159,7 @@ pub struct SingleConnReceiveDataFuture<'a> {
 }
 
 impl<'a> Future for SingleConnReceiveDataFuture<'a> {
-    type Output = (Result<&'a [u8], std::io::Error>, usize);
+    type Output = (Result<usize, std::io::Error>, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let client = self.client.take().unwrap();
@@ -179,8 +179,9 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                 // Buffer is filled && we have enough quota to send this section
                 // We don't update buf_filled here because we don't know if the other side of the
                 // multiplexed stream has enough quota to receive
+                client.buf_filled = None;
                 let n = n.get() as usize;
-                Poll::Ready((Ok(&client.buf[..n]), client.id))
+                Poll::Ready((Ok(n), client.id))
             }
             None => {
                 let filled = {
@@ -202,7 +203,7 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                 let filled = filled as u32; // We use an 8KB buffer so it's impossible for this to get above u32 limit.
                 if filled == 0 {
                     // EOF, pass it on
-                    return Poll::Ready((Ok(&[]), client.id));
+                    return Poll::Ready((Ok(0), client.id));
                 }
                 let filled = NonZeroU32::new(filled).unwrap();
                 let fut = client.limiter.until_n_ready(filled);
@@ -220,37 +221,38 @@ impl<'a> Future for SingleConnReceiveDataFuture<'a> {
                     }
                 }
                 // We have data, and have enough quota to send it!
-                Poll::Ready((Ok(&client.buf[..filled.get() as usize]), client.id))
+                Poll::Ready((Ok(filled.get() as usize), client.id))
             }
         }
     }
 }
 
 #[derive(Debug)]
-pub struct PendingIfZero<Fut: Future> {
-    pub unordered: FuturesUnordered<Fut>,
+pub struct ArrayPollSingle<'a> {
+    pub arr: Option<&'a mut [SingleRecvConn]>,
+    pub index: Option<&'a mut usize>,
 }
 
-impl<Fut: Future> PendingIfZero<Fut> {
-    pub fn new(unordered: FuturesUnordered<Fut>) -> Self {
-        Self { unordered }
-    }
-}
-
-impl<Fut: Future> Future for PendingIfZero<Fut> {
-    type Output = Fut::Output;
+impl<'a> Future for ArrayPollSingle<'a> {
+    type Output = (Result<usize, std::io::Error>, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let Poll::Ready(opt) = self.unordered.poll_next_unpin(cx) else {
-            // futures unordered is still polling, so we are polling too
-            return Poll::Pending;
-        };
-        let Some(fut) = opt else {
-            // If futures unordered returns None, that means there's 0 futures inside it.
-            // So we should just return polling so the other "select" branches can run
-            return Poll::Pending;
-        };
-        Poll::Ready(fut)
+        let arr = self.arr.take().unwrap();
+        let index = self.index.take().unwrap();
+        *index %= arr.len();
+        for _ in 0..arr.len() {
+            {
+                let fut = arr[*index].recv();
+                let fut = pin!(fut);
+                match fut.poll(cx) {
+                    Poll::Ready(res) => return Poll::Ready(res),
+                    Poll::Pending => {}
+                }
+                *index += 1;
+                *index %= arr.len();
+            }
+        }
+        Poll::Pending
     }
 }
 
@@ -303,19 +305,19 @@ impl RecvBuffer {
 }
 
 #[derive(Debug)]
-pub struct MultiRecvBuf {
+pub struct RecvMux {
     limiter: Arc<Limiter>,
     buf: RecvBuffer,
     id: usize,
 }
 
 #[derive(Debug)]
-pub struct MultiRecvBufFuture<'a> {
+pub struct RecvMuxFuture<'a> {
     // Lifetime workaround
-    conn: Option<&'a mut MultiRecvBuf>,
+    conn: Option<&'a mut RecvMux>,
 }
 
-impl<'a> Future for MultiRecvBufFuture<'a> {
+impl<'a> Future for RecvMuxFuture<'a> {
     type Output = usize;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -338,5 +340,37 @@ impl<'a> Future for MultiRecvBufFuture<'a> {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct ArrayPollMux<'a> {
+    pub arr: Option<&'a mut [RecvMux]>,
+    pub index: Option<&'a mut usize>,
+}
+
+impl<'a> Future for ArrayPollMux<'a> {
+    type Output = usize;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let arr = self.arr.take().unwrap();
+        let index = self.index.take().unwrap();
+        *index %= arr.len();
+        for _ in 0..arr.len() {
+            {
+                let fut = RecvMuxFuture {
+                    conn: Some(&mut arr[*index]),
+                };
+                let fut = pin!(fut);
+                // blocked on https://github.com/rust-lang/rust/issues/54663
+                match fut.poll(cx) {
+                    Poll::Ready(res) => return Poll::Ready(res),
+                    Poll::Pending => {}
+                }
+                *index += 1;
+                *index %= arr.len();
+            }
+        }
+        Poll::Pending
     }
 }
