@@ -1,11 +1,14 @@
 [package]
-name = "mineshare2"
+name = "mineshare"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
 clap = { version = "4.5.39", features = ["derive"] }
+futures = "0.3.31"
 governor = "0.10.0"
+rand = "0.9.1"
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 url = "2.5.4"
 
