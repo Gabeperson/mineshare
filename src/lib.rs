@@ -1,5 +1,9 @@
 pub mod wordlist;
 
+use std::io::ErrorKind;
+use std::net::SocketAddr;
+use std::num::NonZero;
+
 use governor::RateLimiter;
 use governor::clock::DefaultClock;
 use governor::middleware::NoOpMiddleware;
@@ -7,14 +11,20 @@ use governor::state::InMemoryState;
 use governor::state::NotKeyed;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+use tracing::info;
+use tracing::warn;
 
 pub const RECV_BUF_SIZE: usize = 128 * 1024;
 pub const MUX_RECV_BUF_SIZE: usize = 256 * 1024;
 pub const TIMEOUT_DURATION_SECS: f32 = 15.;
 pub const SEND_BUF: usize = 8 * 1024;
 
-pub const LIMIT_MEGABYTE_PER_SECOND: u32 = 128 * 1024;
-pub const LIMIT_BURST: u32 = 256 * 1024;
+pub const LIMIT_MEGABYTE_PER_SECOND: NonZero<u32> = NonZero::new(128 * 1024).unwrap();
+pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
+
+pub const BUF_PER_CONN: usize = 256 * 1024; // yamux default
+pub const MAX_CONN_COUNT: usize = 20;
+pub const TOTAL_BUF_SIZE: usize = BUF_PER_CONN * MAX_CONN_COUNT;
 
 #[derive(Clone, Debug)]
 pub enum Message<'a> {
@@ -154,6 +164,78 @@ impl<'a> Message<'a> {
             _ => Err(std::io::ErrorKind::InvalidData.into()),
         }
     }
+}
+
+pub fn try_parse_init_packet<'a>(
+    buf: &'a [u8],
+    addr: SocketAddr,
+    base_domain: &[u8],
+) -> Result<Option<&'a [u8]>, std::io::Error> {
+    let mut inner_cursor = 0;
+    let (_len, read) = match varint::decode_varint(buf) {
+        Ok(Some(res)) => res,
+        Ok(None) => return Ok(None),
+        Err(_e) => {
+            info!("client {addr} sent invalid packet length varint (cannot parse)");
+            return Err(ErrorKind::InvalidData.into());
+        }
+    };
+    inner_cursor += read;
+    let (packet_id, read) = match varint::decode_varint(&buf[inner_cursor..]) {
+        Ok(Some(res)) => res,
+        Ok(None) => return Ok(None),
+        Err(_e) => {
+            info!("client {addr} sent invalid packet id varint (cannot parse)");
+            return Err(ErrorKind::InvalidData.into());
+        }
+    };
+    inner_cursor += read;
+    if packet_id != 0 {
+        // Handshaking protocol ID should be 0
+        info!("client {addr} sent invalid packet protocol ID");
+        return Err(ErrorKind::InvalidData.into());
+    }
+    let (_protocol_version, read) = match varint::decode_varint(&buf[inner_cursor..]) {
+        Ok(Some(res)) => res,
+        Ok(None) => return Ok(None),
+        Err(_e) => {
+            info!("client {addr} sent invalid protocol version varint (cannot parse)");
+            return Err(ErrorKind::InvalidData.into());
+        }
+    };
+    inner_cursor += read;
+    let (strlen, read) = match varint::decode_varint(&buf[inner_cursor..]) {
+        Ok(Some(res)) => res,
+        Ok(None) => return Ok(None),
+        Err(_e) => {
+            info!("client {addr} sent invalid Host string length");
+            return Err(ErrorKind::InvalidData.into());
+        }
+    };
+    inner_cursor += read;
+    if strlen > 256 {
+        warn!("Received packet with hostname len set to {strlen}");
+        return Err(ErrorKind::InvalidData.into());
+    }
+    if buf[inner_cursor..].len() < strlen as usize {
+        // Haven't received enough data
+        return Ok(None);
+    }
+    let hostname = &buf[inner_cursor..inner_cursor + strlen as usize];
+    let access = if let Some(prefix) = hostname.strip_suffix(base_domain) {
+        if prefix.is_empty() {
+            info!("client {addr} sent empty hostname");
+            return Err(ErrorKind::InvalidData.into());
+        }
+        prefix
+    } else {
+        info!(
+            "client {addr} connected via non-base domain URL: `{}`",
+            String::from_utf8_lossy(hostname)
+        );
+        return Err(ErrorKind::InvalidData.into());
+    };
+    Ok(Some(access))
 }
 
 pub mod varint {
