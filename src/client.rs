@@ -9,8 +9,8 @@ use tokio::{
 };
 use tracing::{error, info};
 
-const DEFAULT_URL: &str = "mineshare.dev:25564";
-const DEFAULT_PLAY_URL: &str = "mineshare.dev:25563";
+const DEFAULT_URL: &str = "mc.mineshare.dev:25564";
+const DEFAULT_PLAY_URL: &str = "mc.mineshare.dev:25563";
 
 #[tokio::main]
 async fn main() {
