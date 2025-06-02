@@ -23,10 +23,10 @@ jobs:
             ext: ""
             os: macos-latest
 
-          - target: x86_64-pc-windows-gnu
+          - target: x86_64-pc-windows-msvc
             ext: ".exe"
             os: windows-latest
-          - target: aarch64-pc-windows-gnu
+          - target: aarch64-pc-windows-msvc
             ext: ".exe"
             os: windows-latest
 
@@ -59,10 +59,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/
+          path: |
+            dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+            dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+            dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
