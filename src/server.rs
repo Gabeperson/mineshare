@@ -84,6 +84,7 @@ async fn async_main() {
     }
 }
 
+#[instrument(skip_all)]
 async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Router) {
     let server_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -108,7 +109,7 @@ async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Rou
     info!("Successfully setup server initial connection handler");
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn client_handler(addr: &str, router: Router) {
     let client_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -187,7 +188,7 @@ async fn client_handler(addr: &str, router: Router) {
     info!("Successfully setup client handler");
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn server_play_request_handler(addr: &str, router: Router) {
     let server_play_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -232,7 +233,7 @@ async fn server_play_request_handler(addr: &str, router: Router) {
     });
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn server_handler(
     mut server_stream: TcpStream,
     addr: SocketAddr,
@@ -305,7 +306,7 @@ async fn server_handler(
     router.remove_prefix(&prefix).await;
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn handle_connect_two(
     id: u128,
     recv: oneshot::Receiver<ServerPlayConn>,
@@ -342,7 +343,7 @@ async fn handle_connect_two(
     .await;
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn handle_duplex(
     client_conn: ClientConn,
     server_addr: SocketAddr,
@@ -585,7 +586,8 @@ fn get_random_prefix<T>(map: &HashMap<Vec<u8>, mpsc::Sender<T>>) -> String {
     let mut rng = rand::rng();
     let first = WORD_LIST.choose(&mut rng).unwrap();
     let second = WORD_LIST.choose(&mut rng).unwrap();
-    let mut s = format!("{first}-{second}");
+    let third = WORD_LIST.choose(&mut rng).unwrap();
+    let mut s = format!("{first}-{second}-{third}");
     while map.contains_key(s.as_bytes()) {
         let first = WORD_LIST.choose(&mut rng).unwrap();
         let second = WORD_LIST.choose(&mut rng).unwrap();
