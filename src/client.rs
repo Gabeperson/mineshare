@@ -9,8 +9,7 @@ use tokio::{
 };
 use tracing::{error, info};
 
-const DEFAULT_URL: &str = "mc.mineshare.dev:25564";
-const DEFAULT_PLAY_URL: &str = "mc.mineshare.dev:25563";
+const DEFAULT_URL: &str = "mc.mineshare.dev";
 
 #[tokio::main]
 async fn main() {
@@ -31,7 +30,7 @@ async fn async_main() {
         }
     };
     println!("Proxy connection completed");
-    println!("Fetching url");
+    println!("Fetching Url");
     let mut u64_buf = [0u8; 8];
     let domain_fut = async {
         proxy_conn.read_exact(&mut u64_buf).await?;
@@ -245,11 +244,16 @@ struct Args {
     /// The proxy server URL. Leave blank to connect to the default proxy.
     #[arg(long, default_value = DEFAULT_URL)]
     proxy_server: String,
-    /// The proxy server play URL. Leave blank to connect to the default proxy.
-    #[arg(long, default_value = DEFAULT_PLAY_URL)]
-    proxy_server_play: String,
+    /// The proxy server's server connect port. This is the port that the host server
+    /// initially connects to, to request the server to assign it a proxied url
+    /// Leave blank to connect to the default port
+    #[arg(long, default_value_t = 25564)]
+    /// The proxy server's PLAY port. This is the port that the host server
+    /// connects to once requested by the proxy server, to start proxying the connection.
+    /// Leave blank to connect to the default port
+    server_connection_port: u16,
+    #[arg(long, default_value_t = 25563)]
+    proxy_server_play: u16,
     /// The MC server that you want to proxy.
-    /// If the server is on your computer, leave it as the default.
-    #[arg(default_value = "localhost:25565")]
     server_socket_addr: String,
 }

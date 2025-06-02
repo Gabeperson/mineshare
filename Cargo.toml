@@ -1,6 +1,10 @@
 [package]
 name = "mineshare"
 version = "0.1.0"
+authors = ["Gabeperson"]
+description = "A small, no portforwarding reverse proxy app for small Minecraft servers"
+repository = "https://github.com/Gabeperson/mineshare"
+license = "APACHE-2.0"
 edition = "2024"
 
 [dependencies]
@@ -12,11 +16,11 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 
 [[bin]]
-name = "server"
+name = "mineshare_server"
 path = "src/server.rs"
 
 [[bin]]
-name = "client"
+name = "mineshare"
 path = "src/client.rs"
 
 
