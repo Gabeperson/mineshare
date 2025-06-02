@@ -47,7 +47,7 @@ a custom server, see the --help menu of the app.
 ## Public server
 
 The public server at `mineshare.dev` is a pretty weak server located in US-WEST.
-It may go down if people are using it too much.
+It is rate-limited, but it may go down if people are using it too much.
 Unfortunately I do not have enough funds for a good one, nor to host multiple in multiple regions, so you may get
 bad pings or multiple disconnects if you wish to use the public server.
 
