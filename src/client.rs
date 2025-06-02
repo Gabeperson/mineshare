@@ -1,18 +1,20 @@
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
 use std::{io::ErrorKind, net::SocketAddr, str::FromStr as _, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, tcp::OwnedReadHalf},
     select,
 };
 use tracing::{error, info};
 
-const DEFAULT_URL: &str = "mc.gshwang.com:25564";
-const DEFAULT_PLAY_URL: &str = "mc.gshwang.com:25563";
+const DEFAULT_URL: &str = "mineshare.dev:25564";
+const DEFAULT_PLAY_URL: &str = "mineshare.dev:25563";
 
 #[tokio::main]
 async fn main() {
-    async_main().await
+    async_main().await;
 }
 
 async fn async_main() {
@@ -55,7 +57,7 @@ async fn async_main() {
     };
     println!("Fetched Url");
     println!("Proxy url: {domain}");
-    let (mut recv, mut send) = proxy_conn.into_split();
+    let (recv, mut send) = proxy_conn.into_split();
     tokio::task::spawn(async move {
         loop {
             if let Err(e) = send.write_all(b"heartbeat").await {
@@ -66,59 +68,61 @@ async fn async_main() {
         }
     });
 
-    tokio::task::spawn(async move {
-        loop {
-            let id = match recv.read_u128().await {
-                Ok(id) => id,
+    _ = tokio::task::spawn(main_loop(recv, args));
+    tokio::signal::ctrl_c().await.unwrap();
+}
+
+async fn main_loop(mut recv: OwnedReadHalf, args: Args) {
+    loop {
+        let id = match recv.read_u128().await {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Server disconnected: {e}");
+                std::process::exit(1);
+            }
+        };
+        println!("Server sent request with id: {id}");
+        let addr = args.proxy_server_play.clone();
+        let saddr = args.server_socket_addr.clone();
+        tokio::task::spawn(async move {
+            println!("Starting proxy PLAY request with id {id}");
+            let proxy_stream = TcpStream::connect(addr).await;
+            let mut proxy_stream = match proxy_stream {
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Server disconnected: {e}");
+                    eprintln!("Failed to connect to proxy's PLAY port: {e}");
                     std::process::exit(1);
                 }
             };
-            println!("Server sent request with id: {id}");
-            let addr = args.proxy_server_play.clone();
-            let saddr = args.server_socket_addr.clone();
-            tokio::task::spawn(async move {
-                println!("Starting proxy PLAY request with id {id}");
-                let proxy_streanm = TcpStream::connect(addr).await;
-                let mut proxy_stream = match proxy_streanm {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to connect to proxy's PLAY port: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                println!("Proxy PLAY connected");
-                println!("Connecting to MC server stream");
-                let server_stream = TcpStream::connect(saddr).await;
-                let server_stream = match server_stream {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to connect to server: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                println!("Connected to MC server");
-                let server_addr = match server_stream.peer_addr() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        eprintln!("Failed to fetch server's peer addr: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                if let Err(e) = proxy_stream.write_u128(id).await {
-                    eprintln!("Failed to send ID to server: {e}");
+            println!("Proxy PLAY connected");
+            println!("Connecting to MC server stream");
+            let server_stream = TcpStream::connect(saddr).await;
+            let server_stream = match server_stream {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to connect to server: {e}");
                     std::process::exit(1);
                 }
-                if let Err(e) = proxy_stream.flush().await {
-                    eprintln!("Failed to send ID to server: {e}");
+            };
+            println!("Connected to MC server");
+            let server_addr = match server_stream.peer_addr() {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("Failed to fetch server's peer addr: {e}");
                     std::process::exit(1);
                 }
-                handle_duplex(proxy_stream, server_addr, server_stream).await;
-            });
-        }
-    });
-    tokio::signal::ctrl_c().await.unwrap();
+            };
+            if let Err(e) = proxy_stream.write_u128(id).await {
+                eprintln!("Failed to send ID to server: {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = proxy_stream.flush().await {
+                eprintln!("Failed to send ID to server: {e}");
+                std::process::exit(1);
+            }
+            handle_duplex(proxy_stream, server_addr, server_stream).await;
+        });
+    }
 }
 
 async fn handle_duplex(
@@ -238,9 +242,14 @@ async fn handle_duplex(
 
 #[derive(Parser, Debug)]
 struct Args {
+    /// The proxy server URL. Leave blank to connect to the default proxy.
     #[arg(long, default_value = DEFAULT_URL)]
     proxy_server: String,
+    /// The proxy server play URL. Leave blank to connect to the default proxy.
     #[arg(long, default_value = DEFAULT_PLAY_URL)]
     proxy_server_play: String,
+    /// The MC server that you want to proxy.
+    /// If the server is on your computer, leave it as the default.
+    #[arg(default_value = "localhost:25565")]
     server_socket_addr: String,
 }

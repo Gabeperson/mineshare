@@ -1,3 +1,7 @@
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::num::NonZero;
@@ -13,14 +17,12 @@ pub fn try_parse_init_packet(
     addr: SocketAddr,
 ) -> Result<Option<&[u8]>, std::io::Error> {
     let mut inner_cursor = 0;
-    let (_len, read) = match varint::decode_varint(buf)? {
-        Some(res) => res,
-        None => return Ok(None),
+    let Some((_len, read)) = varint::decode_varint(buf)? else {
+        return Ok(None);
     };
     inner_cursor += read;
-    let (packet_id, read) = match varint::decode_varint(&buf[inner_cursor..])? {
-        Some(res) => res,
-        None => return Ok(None),
+    let Some((packet_id, read)) = varint::decode_varint(&buf[inner_cursor..])? else {
+        return Ok(None);
     };
     inner_cursor += read;
     if packet_id != 0 {
@@ -28,14 +30,12 @@ pub fn try_parse_init_packet(
         warn!("client {addr} sent invalid packet protocol ID");
         return Err(ErrorKind::InvalidData.into());
     }
-    let (_protocol_version, read) = match varint::decode_varint(&buf[inner_cursor..])? {
-        Some(res) => res,
-        None => return Ok(None),
+    let Some((_protocol_version, read)) = varint::decode_varint(&buf[inner_cursor..])? else {
+        return Ok(None);
     };
     inner_cursor += read;
-    let (strlen, read) = match varint::decode_varint(&buf[inner_cursor..])? {
-        Some(res) => res,
-        None => return Ok(None),
+    let Some((strlen, read)) = varint::decode_varint(&buf[inner_cursor..])? else {
+        return Ok(None);
     };
     inner_cursor += read;
     if strlen > 256 {
@@ -51,6 +51,7 @@ pub fn try_parse_init_packet(
 }
 
 pub mod varint {
+    #[must_use]
     pub fn encode_varint(mut value: u64) -> ([u8; 10], usize) {
         let mut index = 0;
         let mut buf = [0u8; 10];
@@ -71,7 +72,7 @@ pub mod varint {
                 Some(b) => *b,
                 None => return Ok(None),
             };
-            result |= ((byte & 0x7f) as u64) << (7 * i);
+            result |= u64::from(byte & 0x7f) << (7 * i);
             if byte & 0x80 == 0 {
                 return Ok(Some((result, i + 1)));
             }
