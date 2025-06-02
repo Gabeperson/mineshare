@@ -24,6 +24,7 @@ a custom server, see the --help menu of the app.
    - If you are hosting on LAN, the port will be displayed in the chat
    - If you are hosting a full server, the port is likely 25565
 4. Open the command line and run mineshare with the argument of ip:port.
+   Use the full executable name (ex: `mineshare-x86_64-pc-windows-msvc.exe`). For brevity, this will be shortened to `mineshare` for the following steps.
 
    - If you are hosting the server on your computer, you will want to use
      `localhost` as your ip.
@@ -36,7 +37,7 @@ a custom server, see the --help menu of the app.
      - Hosting on another computer that has IP 192.168.1.60 and port 5930:
        `mineshare 192.168.1.60:5930`
 
-5. You should see something like:
+6. You should see something like:
 
    ```
    Starting proxy connection
@@ -48,7 +49,7 @@ a custom server, see the --help menu of the app.
 
    The people you want connecting to your server can now use the url given to connect to your server.
 
-6. Shutting down the connection
+7. Shutting down the connection
    - Once you exit the mineshare application, all connected players will disconnect.
 
 ## Public server
