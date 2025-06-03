@@ -1,7 +1,5 @@
 # mineshare
 
-### Please do not abuse the public proxy server for unintended uses
-
 mineshare is a simple, no portforwarding proxy app for small Minecraft servers
 
 Essentially, it lets you _share_ your *mine*craft servers without much setup other than running one executable.
@@ -53,6 +51,8 @@ a custom server, see the --help menu of the app.
 
 ## Public server
 
+#### Please do not abuse the public proxy server for unintended uses
+
 The public server at `mineshare.dev` is a single, pretty weak server located in US-WEST.
 It is rate-limited, but it may go down if people are using it too much.
 So you may get bad ping or multiple disconnects if you wish to use the public server.
@@ -89,7 +89,7 @@ The proxy then starts 3 TCP listeners.
 When a server wants to be proxied, it will connect to the initial server connection listener on the proxy
 using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
 from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
-Since there's 3 words, it is HIGHLY unlikely ($1/7776^3$ or $~2.13e-10%$ chance) for any malicious users to guess a server id.
+Since there's 3 words, it is HIGHLY unlikely ($\frac{1}{7776^3}$ or ~$`2.13*10^{-10}\%`$ chance) for any malicious users to guess a server id.
 Then the proxy sends this to the server, which will display it.
 
 Once a client connects to the proxy with this server ID, the proxy parses the "hello" packet for the hostname.
