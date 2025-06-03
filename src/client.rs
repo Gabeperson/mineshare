@@ -1,9 +1,10 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
-use mineshare::Message;
+use ed25519_dalek::VerifyingKey;
+use mineshare::{Addr, BincodeAsync as _, Message, dhauth::AuthenticatorServer};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{io::ErrorKind, net::SocketAddr, str::FromStr as _, sync::Arc};
+use std::{io::ErrorKind, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -93,47 +94,27 @@ async fn async_main() {
     tokio::signal::ctrl_c().await.unwrap();
 }
 
-async fn main_loop<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, args: Args) {
+async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: Args) {
     let proxy_play: Arc<str> = Arc::from(format!(
         "{}:{}",
         args.proxy_server, args.proxy_server_play_port
     ));
     let mut buf = [0u8; 512];
-    let mut read_amt = 0;
     loop {
-        match conn.read(&mut buf[read_amt..]).await {
-            Ok(read) => {
-                read_amt += read;
-            }
+        let msg = match Message::parse(&mut conn, &mut buf).await {
+            Ok(msg) => msg,
             Err(e) => {
-                error!("Server disconnected: {e}");
-                std::process::exit(1);
-            }
-        }
-        if read_amt < 8 {
-            // Can't read length yet
-            continue;
-        }
-        let len = u64::from_be_bytes(buf[..8].try_into().unwrap());
-        if read_amt - 8 < len as usize {
-            // Can't read body of msg yet
-            continue;
-        }
-        let (msg, _len) = match bincode::decode_from_slice::<Message, _>(
-            &buf[8..8 + len as usize],
-            bincode::config::standard(),
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                error!("Server sent message that couldn't be decoded: {e}");
+                error!("Error parsing message send by server: {e}");
                 std::process::exit(1);
             }
         };
-        buf.copy_within(8 + len as usize.., 0);
-        read_amt -= 8 + len as usize;
-        let id = match msg {
+        let (id, pubkey) = match msg {
             Message::HeartBeat(data) => {
-                if let Err(e) = send_heartbeat(&mut conn, data).await {
+                let mut buf = [0u8; 128];
+                if let Err(e) = Message::HeartBeatEcho(data)
+                    .encode(&mut conn, &mut buf)
+                    .await
+                {
                     error!("Writing heartbeat echo to server failed: {e}");
                     std::process::exit(1);
                 }
@@ -143,7 +124,7 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, args: Args) {
                 error!("Proxy server sent ECHO?");
                 std::process::exit(1);
             }
-            Message::NewClient(id) => id,
+            Message::NewClient(id, pkey) => (id, pkey),
         };
 
         info!("Server sent request with id: {id}");
@@ -179,7 +160,12 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, args: Args) {
                     std::process::exit(1);
                 }
             };
-            if let Err(e) = proxy_stream.write_u128(id).await {
+            let auth = AuthenticatorServer {
+                inner: &mut proxy_stream,
+                alice_public_sign_key: VerifyingKey::from_bytes(&pubkey)
+                    .expect("Assume the server gives us valid keys. No reason it wouldn't"),
+            };
+            if let Err(e) = auth.send_id(id).await {
                 error!("Failed to send ID to server: {e}");
                 std::process::exit(1);
             }
@@ -192,48 +178,14 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, args: Args) {
     }
 }
 
-async fn send_heartbeat<S: AsyncWrite + AsyncRead + Unpin>(
-    conn: &mut S,
-    data: [u8; 32],
-) -> Result<(), std::io::Error> {
-    let mut buf = [0u8; 64];
-    let encoded_len = bincode::encode_into_slice(
-        Message::HeartBeatEcho(data),
-        &mut buf,
-        bincode::config::standard(),
-    )
-    .expect("Serializing hearteat response should never fail!");
-    conn.write_u64(encoded_len as u64).await?;
-    conn.write_all(&buf[..encoded_len]).await?;
-    Ok(())
-}
-
 async fn handle_duplex(
     mut proxy_server_stream: TcpStream,
     mc_server_addr: SocketAddr,
     mut mc_server_stream: TcpStream,
 ) {
-    let mut buf1 = vec![0u8; 32 * 1024];
-
-    let client_addr_fut = async {
-        let len = proxy_server_stream.read_u64().await? as usize;
-        let len = proxy_server_stream.read_exact(&mut buf1[..len]).await?;
-        let s = match str::from_utf8(&buf1[..len]) {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(std::io::Error::new(ErrorKind::InvalidData, e));
-            }
-        };
-        let socketaddr = match SocketAddr::from_str(s) {
-            Ok(a) => a,
-            Err(e) => {
-                return Err(std::io::Error::new(ErrorKind::InvalidData, e));
-            }
-        };
-        Ok::<SocketAddr, std::io::Error>(socketaddr)
-    };
-    let client_addr = match client_addr_fut.await {
-        Ok(a) => a,
+    let mut buf = vec![0u8; 128];
+    let client_addr = match Addr::parse(&mut proxy_server_stream, &mut buf).await {
+        Ok(Addr(client_addr)) => client_addr,
         Err(e) => {
             error!("Failed to read socketaddr from client connection: {e}");
             _ = proxy_server_stream.shutdown().await;
@@ -241,8 +193,8 @@ async fn handle_duplex(
             return;
         }
     };
+    drop(buf);
     let mut proxy_stream = proxy_server_stream;
-    drop(buf1);
     info!("Connected {client_addr} to {mc_server_addr}");
     info!("Beginning proxying...");
     let mut buf1 = vec![0u8; 32 * 1024];

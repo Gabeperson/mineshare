@@ -14,16 +14,15 @@ a custom server, see the --help menu of the app.
 1. Download the appropriate executable that starts with `mineshare` (not `mineshare-server`)
    from the GitHub releases or via another method.
    - If you are on Windows, you will probably want `mineshare-x86_64-pc-windows-msvc.exe`
-      - If you know you're on an ARM cpu, you should go for `mineshare-x86_64-pc-windows-msvc.exe`
+     - If you know you're on an ARM cpu, you should go for `mineshare-x86_64-pc-windows-msvc.exe`
    - If you are on macOS, you will probably want `mineshare-aarch64-apple-darwin` executable.
-      - If you're on *intel* macOS, you will want `mineshare-mineshare-x86_64-apple-darwin`
+     - If you're on _intel_ macOS, you will want `mineshare-mineshare-x86_64-apple-darwin`
    - If you are on linux, you probably know which one to get (They're both built with musl)
-   
-3. Setup the local server you will be using and note down its port number.
+2. Setup the local server you will be using and note down its port number.
    - This can be your local LAN server, or a full fledged server.
    - If you are hosting on LAN, the port will be displayed in the chat
    - If you are hosting a full server, the port is likely 25565
-4. Open the command line and run mineshare with the argument of ip:port.
+3. Open the command line and run mineshare with the argument of ip:port.
    Use the full executable name (ex: `mineshare-x86_64-pc-windows-msvc.exe`). For brevity, this will be shortened to `mineshare` for the following steps.
 
    - If you are hosting the server on your computer, you will want to use
@@ -37,7 +36,7 @@ a custom server, see the --help menu of the app.
      - Hosting on another computer that has IP 192.168.1.60 and port 5930:
        `mineshare 192.168.1.60:5930`
 
-6. You should see something like:
+4. You should see something like:
 
    ```
    Starting proxy connection
@@ -49,7 +48,7 @@ a custom server, see the --help menu of the app.
 
    The people you want connecting to your server can now use the url given to connect to your server.
 
-7. Shutting down the connection
+5. Shutting down the connection
    - Once you exit the mineshare application, all connected players will disconnect.
 
 ## Public server
@@ -75,27 +74,38 @@ Then you open the ports `443`, `25564`, and `25565`.
 Then run the server with the base domain and email info (for LetsEncrypt), and it should start running.
 There are also some other utilities in the CLI arguments if you would like to modify some things.
 
-## How does it work
+## How does it work (Technical details)
 
-The server first starts 3 listeners.
+Proxy = mineshare_server*[.EXE]
+Server = mineshare*[.EXE]
+
+The proxy first generates a ed25519 keypair.
+The proxy then starts 3 TCP listeners.
 
 1. Listener for the initial server connection
 2. Listener for client
 3. Listener for server "PLAY" requests
 
-When a server wants to be proxied, it will connect to the initial server connection listener on the proxy server
+When a server wants to be proxied, it will connect to the initial server connection listener on the proxy
 using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
 from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
-Since there's 3 words, it is HIGHLY unlikely ($1/7776^3$ or $~2.13e-10%$) for any malicious users to guess a server id.
-Then the proxy server sends this to the server, which will display it.
+Since there's 3 words, it is HIGHLY unlikely ($1/7776^3$ or $~2.13e-10%$ chance) for any malicious users to guess a server id.
+Then the proxy sends this to the server, which will display it.
 
-Once a client connects with this server ID, it is matched to the correct server, and the server is sent a client ID, which is a 128-bit randomly generated number.
-The server then initiates another TCP TLS request to the server, again on 443, then sends the client ID.
+Once a client connects to the proxy with this server ID, the proxy parses the "hello" packet for the hostname.
+Using this hostname, the client is matched to the correct server, and the server is sent a client ID,
+which is a 128-bit randomly generated number, and also the ed25519 verification key.
+The server then initiates another TCP request to the server, this time on a custom port (default 25564), and performs
+an authenticated diffie-hellman exchange using the ed25519 verification key from before.
+Using this shared secret and aes-gcm-siv, it encrypts the 128-bit ID and sends it over.
+
+By doing this, we can ensure that no MITM can happen. See the `dhauth` module in the `src/lib.rs` file for more details
+(Is there an easier & better way of doing this? Probably. Oh well, it works)
+
+The proxy then decrypts this aes-gcm-siv encrypted ID also using its shared secret and connects the client stream and the server stream.
 The server also creates a connection to the MC server.
-Once the ID is sent, both the server and client cancel the TLS, and they begin proxying their respective connections:
 
-- The proxy looks up the ID, and connects the waiting client with the server connection (now non-tls)
-- The server connects the now non-tls'd connection to the proxy to the actual MC server stream.
+Now there is a duplex connection from the client to the MC server, and we can just bidirectionally copy bytes over.
 
 ## Contributions
 

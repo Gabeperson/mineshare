@@ -1,7 +1,10 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 
+// TODO: add to counter more times
+// TODO: more timeouts on client and server side stuff
 use clap::Parser;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
@@ -9,7 +12,8 @@ use governor::{
     state::{InMemoryState, NotKeyed},
 };
 use mineshare::{
-    LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message, try_parse_init_packet, varint, wordlist,
+    Addr, BincodeAsync as _, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
+    dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
 use rustls_acme::{AcmeConfig, caches::DirCache};
@@ -45,6 +49,10 @@ async fn main() {
 }
 
 async fn async_main() {
+    let mut secret_key_bytes = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
+    rand::rng().fill(&mut secret_key_bytes);
+    let alice_signing_key = SigningKey::from_bytes(&secret_key_bytes);
+    let alice_verify_key = alice_signing_key.verifying_key();
     tracing_subscriber::fmt::fmt()
         .with_max_level(Level::INFO)
         .with_env_filter("mineshare=info")
@@ -61,10 +69,17 @@ async fn async_main() {
         args.email,
         args.prefix,
         args.prod,
+        alice_verify_key,
     )
     .await;
     client_handler(&args.client_socket_addr, router.clone()).await;
-    server_play_request_handler(&args.server_play_socket_addr, router.clone()).await;
+    server_play_request_handler(
+        &args.server_play_socket_addr,
+        router.clone(),
+        alice_signing_key,
+        global_counter.clone(),
+    )
+    .await;
     info!("Started listening");
     // Megabytes
     let max_network = args.max_network * 1024 * 1024;
@@ -100,6 +115,7 @@ async fn server_initial_handler(
     email: String,
     prefix: String,
     prod: bool,
+    verifying_key: VerifyingKey,
 ) {
     let addr = format!("{addr}:443");
     let server_listener = match TcpListener::bind(&addr).await {
@@ -128,7 +144,13 @@ async fn server_initial_handler(
                 continue;
             };
             info!("Received server spawn request from {addr}");
-            tokio::task::spawn(server_handler(stream, addr, global_counter, router));
+            tokio::task::spawn(server_handler(
+                stream,
+                addr,
+                global_counter,
+                router,
+                verifying_key,
+            ));
         }
     });
     info!("Successfully setup server initial connection handler");
@@ -213,7 +235,12 @@ async fn client_handler(addr: &str, router: Router) {
 }
 
 #[instrument(skip_all)]
-async fn server_play_request_handler(addr: &str, router: Router) {
+async fn server_play_request_handler(
+    addr: &str,
+    router: Router,
+    pkey: SigningKey,
+    counter: Arc<AtomicU64>,
+) {
     let server_play_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -228,10 +255,15 @@ async fn server_play_request_handler(addr: &str, router: Router) {
                 .await
                 .expect("Failed to listen");
             let router = router.clone();
+            let pkey = pkey.clone();
+            let counter = counter.clone();
             tokio::task::spawn(async move {
-                let id = match tokio::time::timeout(Duration::from_secs(5), accepted.read_u128())
-                    .await
-                {
+                let auth = AuthenticatorProxy {
+                    inner: &mut accepted,
+                    alice_private_sign_key: pkey,
+                    counter: &counter,
+                };
+                let id = match tokio::time::timeout(Duration::from_secs(5), auth.get_id()).await {
                     Ok(Ok(id)) => id,
                     Ok(Err(e)) => {
                         info!("Couldn't read connect ID from {addr}: {e}");
@@ -257,11 +289,12 @@ async fn server_play_request_handler(addr: &str, router: Router) {
 }
 
 #[instrument(skip_all)]
-async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
+async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut server_stream: S,
     addr: SocketAddr,
     counter: Arc<AtomicU64>,
     router: Router,
+    verifying_key: VerifyingKey,
 ) {
     let (mut new_client_recv, prefix) = {
         let (send, recv) = mpsc::channel(10);
@@ -286,7 +319,6 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
     let timeout_duration = Duration::from_secs(90);
     let heartbeat_time = Duration::from_secs(5);
     let mut timeout_at = Instant::now() + timeout_duration;
-    let mut encode_buf = [0u8; 512];
     let mut decode_buf = [0u8; 512];
     let mut hb_read = 0;
     let abort = Abort::new();
@@ -308,21 +340,15 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _heartbeat = tokio::time::sleep_until(send_heartbeat_at) => {
                     let msg = Message::HeartBeat(data);
-                    let encoded_len = match bincode::encode_into_slice(msg, &mut encode_buf, bincode::config::standard()) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            unreachable!("Serializing heartbeat message should never fail! {e}");
+                    let mut buf = [0u8; 64];
+                    match msg.encode(&mut server_stream, &mut buf).await {
+                        Ok(l) => {
+                            counter.fetch_add(l as u64, Ordering::Relaxed);
+                        }
+                        Err(_e) => {
+                            abort.abort();
+                            return;
                         },
-                    };
-                    let fut = async {
-                        server_stream.write_u64(encoded_len as u64).await?;
-                        server_stream.write_all(&encode_buf[..encoded_len]).await?;
-                        Ok(())
-                    };
-                    let res: Result<(), std::io::Error> = fut.await;
-                    if let Err(_e) = res {
-                        abort.abort();
-                        return;
                     }
                     send_heartbeat_at = Instant::now() + heartbeat_time;
                 }
@@ -330,17 +356,19 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
                     'blck: {
                         match read {
                             Ok(amt) => {
+                                const PACKET_LENGTH_BYTES: usize = 4;
                                 hb_read += amt;
-                                if hb_read < 8 {
+                                if hb_read < PACKET_LENGTH_BYTES {
                                     // Haven't read enough to read packet length
                                     break 'blck;
                                 }
-                                let len: u64 = u64::from_be_bytes(decode_buf[..8].try_into().unwrap());
-                                if hb_read as u64 - 8 < len {
+                                const { assert!(u32::BITS / 8 == PACKET_LENGTH_BYTES as u32) }
+                                let len: u32 = u32::from_be_bytes(decode_buf[..PACKET_LENGTH_BYTES].try_into().unwrap());
+                                if hb_read- PACKET_LENGTH_BYTES < len as usize {
                                     // Haven't read full packet yet
                                     break 'blck;
                                 }
-                                let (decoded, _len) = match bincode::decode_from_slice::<Message, _>(&decode_buf[8..hb_read], bincode::config::standard()) {
+                                let (decoded, _len) = match bincode::decode_from_slice::<Message, _>(&decode_buf[PACKET_LENGTH_BYTES..hb_read], bincode::config::standard()) {
                                     Ok(m) => m,
                                     Err(e) => {
                                         warn!("Invalid packet send by server {addr}: {e}");
@@ -358,8 +386,8 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
                                     abort.abort();
                                     break 'blck;
                                 }
-                                decode_buf.copy_within(8+len as usize.., 0);
-                                hb_read -= 8 + len as usize;
+                                decode_buf.copy_within(PACKET_LENGTH_BYTES+len as usize.., 0);
+                                hb_read -= PACKET_LENGTH_BYTES + len as usize;
                                 timeout_at = Instant::now() + timeout_duration;
                                 send_heartbeat_at = Instant::now() + heartbeat_time;
                                 rand::rng().fill(&mut data);
@@ -377,25 +405,18 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
                     let counter = counter.clone();
                     let (send, recv) = oneshot::channel();
                     let id = router2.add_random_id(send).await;
-                    let msg = Message::NewClient(id);
-                    let mut buf = [0u8; 32];
-                    let len = match bincode::encode_into_slice(msg, &mut buf, bincode::config::standard()) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            unreachable!("Encoding new client message should never fail! {e}");
-                        },
-                    };
-                    let fut = async {
-                        server_stream.write_u64(len as u64).await?;
-                        server_stream.write_all(&buf[..len]).await?;
-                        server_stream.flush().await?;
-                        Ok(())
-                    };
-                    let res: Result<(), std::io::Error> = fut.await;
-                    if let Err(_e) = res {
-                        abort.abort();
-                        return;
+                    let msg = Message::NewClient(id, verifying_key.to_bytes());
+                    let mut buf = [0u8; 256];
+                    match msg.encode(&mut server_stream, &mut buf).await {
+                        Ok(l) => {
+                            counter.fetch_add(l as u64, Ordering::Relaxed);
+                        }
+                        Err(_e) => {
+                            abort.abort();
+                            return;
+                        }
                     }
+                    info!("Send new client msg to {addr}");
                     tokio::task::spawn(handle_connect_two(id, recv, clientconn, counter, router2.clone(), abort.clone()));
                 }
             }
@@ -418,6 +439,7 @@ async fn handle_connect_two(
     let limiter =
         Limiter::direct(Quota::per_second(LIMIT_MEGABYTE_PER_SECOND).allow_burst(LIMIT_BURST));
     let res = tokio::time::timeout(Duration::from_secs(10), recv);
+
     let ServerPlayConn {
         stream: server_stream,
         addr: socketaddr,
@@ -457,22 +479,20 @@ async fn handle_duplex(
         data,
         addr: client_addr,
     } = client_conn;
-    let socketfut = async {
-        let addr_str = client_addr.to_string();
-        let addr_bytes = addr_str.as_bytes();
-        let len = addr_bytes.len() as u64;
-        server_stream.write_u64(len).await?;
-        server_stream.write_all(addr_bytes).await?;
-        server_stream.flush().await?;
-        Ok::<(), std::io::Error>(())
-    };
-    if let Err(e) = socketfut.await {
-        info!("Failed to write client address {client_addr} to server {server_addr}: {e}");
-        _ = DisconnectMessage("Failed to send socketaddr to server")
-            .encode(&mut client_stream)
-            .await;
-        return;
+    let mut buf = vec![0u8; 128];
+    match Addr(client_addr).encode(&mut server_stream, &mut buf).await {
+        Ok(len) => {
+            counter.fetch_add(len as u64, Ordering::Relaxed);
+        }
+        Err(e) => {
+            info!("Failed to write client address {client_addr} to server {server_addr}: {e}");
+            _ = DisconnectMessage("Failed to send socketaddr to server")
+                .encode(&mut client_stream)
+                .await;
+            return;
+        }
     }
+    drop(buf);
     if let Err(e) = server_stream.write_all(&data).await {
         info!("Failed to write {client_addr}'s initial packet to server {server_addr}: {e}");
         _ = DisconnectMessage("Failed to send init packet to server")

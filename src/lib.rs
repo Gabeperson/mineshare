@@ -2,10 +2,11 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::missing_errors_doc)]
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::num::NonZero;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::warn;
 
 pub mod wordlist;
@@ -17,7 +18,52 @@ pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
 pub enum Message {
     HeartBeat([u8; 32]),
     HeartBeatEcho([u8; 32]),
-    NewClient(u128),
+    NewClient(u128, [u8; 32]),
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Addr(pub SocketAddr);
+
+impl BincodeAsync<'_> for Message {}
+impl BincodeAsync<'_> for Addr {}
+
+// TODO use these impls in server & client
+pub trait BincodeAsync<'a>: BorrowDecode<'a, ()> + Encode + Send {
+    fn encode<S: AsyncWrite + Unpin + Send>(
+        self,
+        r: &mut S,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, std::io::Error>> + Send {
+        async {
+            let len = bincode::encode_into_slice(self, buf, bincode::config::standard())
+                .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+            r.write_u32(len as u32).await?;
+            r.write_all(&buf[..len]).await?;
+            r.flush().await?;
+            Ok(len + 4)
+        }
+    }
+    fn parse<S: AsyncRead + Unpin + Send>(
+        r: &mut S,
+        buf: &'a mut [u8],
+    ) -> impl Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            let len = r.read_u32().await?;
+            let len = len as usize;
+            if len > buf.len() {
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let read = r.read_exact(&mut buf[..len]).await?;
+            let (decoded, _len) = match bincode::borrow_decode_from_slice::<Self, _>(
+                &buf[..read],
+                bincode::config::standard(),
+            ) {
+                Ok(d) => d,
+                Err(e) => return Err(std::io::Error::new(ErrorKind::InvalidData, e)),
+            };
+            Ok(decoded)
+        }
+    }
 }
 
 pub fn try_parse_init_packet(
@@ -86,5 +132,142 @@ pub mod varint {
             }
         }
         Err(std::io::ErrorKind::InvalidData.into())
+    }
+}
+
+pub mod dhauth {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::BincodeAsync;
+    use aes_gcm_siv::aead::Aead;
+    use aes_gcm_siv::{Aes256GcmSiv, KeyInit as _, Nonce};
+    use bincode::{BorrowDecode, Decode, Encode};
+    use blake3::Hasher;
+    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+    use rand::Rng as _;
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tracing::error;
+    use x25519_dalek::{EphemeralSecret, PublicKey};
+
+    #[derive(Clone, Debug, Encode, Decode)]
+    struct BobPublic([u8; 32]);
+    #[derive(Clone, Debug, Encode, Decode)]
+    struct AlicePubSignature([u8; 32], [u8; 64]);
+    #[derive(Clone, Debug, Encode, BorrowDecode)]
+    struct Id<'a>([u8; 12], &'a [u8]);
+
+    impl BincodeAsync<'_> for BobPublic {}
+    impl BincodeAsync<'_> for AlicePubSignature {}
+    impl<'a> BincodeAsync<'a> for Id<'a> {}
+
+    pub struct AuthenticatorProxy<'a, S: AsyncRead + AsyncWrite + Send + Unpin> {
+        pub inner: &'a mut S,
+        pub alice_private_sign_key: SigningKey,
+        pub counter: &'a AtomicU64,
+    }
+
+    impl<S: AsyncRead + AsyncWrite + Send + Unpin> AuthenticatorProxy<'_, S> {
+        #[allow(clippy::missing_panics_doc)]
+        pub async fn get_id(mut self) -> Result<u128, std::io::Error> {
+            let mut buf = [0u8; 128];
+            let alice_secret = EphemeralSecret::random();
+            let alice_public = PublicKey::from(&alice_secret);
+
+            let BobPublic(client_public) = BobPublic::parse(&mut self.inner, &mut buf).await?;
+            let bob_public = PublicKey::from(client_public);
+
+            let hashed = sha256(alice_public, bob_public);
+            // Since we sign the hashed alice public and bob public, replay isn't possible because
+            // The bob hash will be different in previous interactions
+            // On-path MITM is also impossible because when bob verifies the signature, it will be off
+            // and he will immediately terminate the connection, suspecting a MITM.
+            let signature = self.alice_private_sign_key.sign(&hashed);
+            let signature = signature.to_bytes();
+            let len = AlicePubSignature(alice_public.to_bytes(), signature)
+                .encode(&mut self.inner, &mut buf)
+                .await?;
+            self.counter.fetch_add(len as u64, Ordering::Relaxed);
+            let Id(nonce, data) = Id::parse(&mut self.inner, &mut buf).await.map_err(|e| {
+                std::io::Error::other(format!("Connection error OR A MITM OCCURED: {e}"))
+            })?;
+
+            // If we got here, it implicitly means that bob accepted our signature, which means
+            // We weren't MITM'd.
+            // Therefore, this should be the shared secret between bob and us
+            let shared = alice_secret.diffie_hellman(&bob_public).to_bytes();
+            let key = shared.into();
+            let aes = Aes256GcmSiv::new(&key);
+
+            let decrypted = aes
+                .decrypt(&Nonce::from(nonce), data)
+                .map_err(|_e| std::io::Error::other("Error occured when decrypting key"))?;
+
+            if decrypted.len() != 16 {
+                return Err(std::io::Error::other(format!(
+                    "ID is {} bytes, expected 16",
+                    decrypted.len()
+                )));
+            }
+
+            let id = u128::from_be_bytes(decrypted[..].try_into().unwrap());
+
+            Ok(id)
+        }
+    }
+    pub struct AuthenticatorServer<'a, S: AsyncRead + AsyncWrite + Send + Unpin> {
+        pub inner: &'a mut S,
+        pub alice_public_sign_key: VerifyingKey,
+    }
+    impl<S: AsyncRead + AsyncWrite + Send + Unpin> AuthenticatorServer<'_, S> {
+        pub async fn send_id(mut self, id: u128) -> Result<(), std::io::Error> {
+            let mut buf = [0u8; 1024];
+            let bob_secret = EphemeralSecret::random();
+            let bob_public = PublicKey::from(&bob_secret);
+
+            BobPublic(bob_public.to_bytes())
+                .encode(&mut self.inner, &mut buf)
+                .await?;
+            let AlicePubSignature(alice_public, signature) =
+                AlicePubSignature::parse(&mut self.inner, &mut buf).await?;
+            let alice_public = PublicKey::from(alice_public);
+
+            // Since the alice and bob public keys should be the same, the hash should also be the same
+            let hashed = sha256(alice_public, bob_public);
+
+            // If the hash is the same, then the verification should pass. Otherwise,
+            // it's probably a MITM.
+            let res = self
+                .alice_public_sign_key
+                .verify(&hashed, &Signature::from(signature));
+            if let Err(e) = res {
+                error!("POTENTIAL MITM? Signature error!!! {e}");
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
+            // Since the hash matched, this should be the shared secret between alice and us
+            let shared = bob_secret.diffie_hellman(&alice_public).to_bytes();
+            let key = shared.into();
+            let aes = Aes256GcmSiv::new(&key);
+            let mut nonce = [0u8; 12];
+            rand::rng().fill(&mut nonce);
+            let nonce_gen = Nonce::from(nonce);
+            let id = id.to_be_bytes();
+            let ciphertext = aes
+                .encrypt(&nonce_gen, &id as &[u8])
+                .map_err(|_e| std::io::Error::other("An error occured while encrypting id"))?;
+
+            Id(nonce, &ciphertext)
+                .encode(&mut self.inner, &mut buf)
+                .await?;
+
+            // We've sent the ID, so now we're done :)
+            Ok(())
+        }
+    }
+    fn sha256(pub1: PublicKey, pub2: PublicKey) -> [u8; 32] {
+        let mut hasher = Hasher::new();
+        hasher.update(b"MINESHARE");
+        hasher.update(pub1.as_bytes());
+        hasher.update(pub2.as_bytes());
+        hasher.finalize().into()
     }
 }
