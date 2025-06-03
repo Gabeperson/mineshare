@@ -10,25 +10,25 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            ext: ""
             os: ubuntu-latest
+            cargo: cargo
           - target: aarch64-unknown-linux-musl
-            ext: ""
             os: ubuntu-latest
+            cargo: cross
 
           - target: x86_64-apple-darwin
-            ext: ""
             os: macos-latest
+            cargo: cargo
           - target: aarch64-apple-darwin
-            ext: ""
             os: macos-latest
+            cargo: cargo
 
           - target: x86_64-pc-windows-msvc
-            ext: ".exe"
             os: windows-latest
+            cargo: cargo
           - target: aarch64-pc-windows-msvc
-            ext: ".exe"
             os: windows-latest
+            cargo: cargo
 
     steps:
       - name: Checkout
@@ -39,7 +39,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install MUSL tools if needed
+      - name: Set up binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Set up cross
+        run: cargo binstall cross
+
+      - name: Set up musl
         if: contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
@@ -48,26 +54,28 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          ${{ matrix.cargo }} build --release --target ${{ matrix.target }}
 
-      - name: Package
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/mineshare${{ matrix.ext }} dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-          cp target/${{ matrix.target }}/release/mineshare_server${{ matrix.ext }} dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+      # - name: Package
+      #   run: |
+      #     mkdir -p dist
+      #     cp target/${{ matrix.target }}/release/mineshare${{ matrix.ext }} dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+      #     cp target/${{ matrix.target }}/release/mineshare_server${{ matrix.ext }} dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: |
-            dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-            dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+          path:
+            target/${{ matrix.target }}/release/*
+            # dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+            # dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-            dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+          files:
+            target/${{ matrix.target }}/release/*
+            # dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+            # dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
