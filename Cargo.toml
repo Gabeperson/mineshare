@@ -8,8 +8,11 @@ license = "APACHE-2.0"
 edition = "2024"
 
 [dependencies]
+aes-gcm-siv = "0.11.1"
 bincode = "2.0.1"
+blake3 = "1.8.2"
 clap = { version = "4.5.39", features = ["derive"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 governor = "0.10.0"
 rand = "0.9.1"
 rustls = "0.23.27"
@@ -20,6 +23,7 @@ tokio-stream = { version = "0.1.17", features = ["net"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 webpki-roots = "1.0.0"
+x25519-dalek = { version = "2.0.1", features = ["getrandom"] }
 
 [[bin]]
 name = "mineshare_server"
