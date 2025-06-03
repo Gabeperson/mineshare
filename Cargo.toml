@@ -9,6 +9,7 @@ edition = "2024"
 
 [dependencies]
 aes-gcm-siv = "0.11.1"
+aws-lc-rs = { version = "1.13.1", features = ["bindgen"] }
 bincode = "2.0.1"
 blake3 = "1.8.2"
 clap = { version = "4.5.39", features = ["derive"] }
