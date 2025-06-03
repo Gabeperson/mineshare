@@ -8,8 +8,11 @@ use governor::{
     middleware::NoOpMiddleware,
     state::{InMemoryState, NotKeyed},
 };
-use mineshare::{LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, try_parse_init_packet, varint, wordlist};
+use mineshare::{
+    LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message, try_parse_init_packet, varint, wordlist,
+};
 use rand::{Rng as _, seq::IndexedRandom as _};
+use rustls_acme::{AcmeConfig, caches::DirCache};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -21,7 +24,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufWriter},
+    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufWriter},
     net::{TcpListener, TcpStream},
     select,
     sync::{
@@ -31,7 +34,8 @@ use tokio::{
     },
     time::Instant,
 };
-use tracing::{Level, debug, error, info, instrument, trace, warn};
+use tokio_stream::{StreamExt as _, wrappers::TcpListenerStream};
+use tracing::{Level, error, info, instrument, trace, warn};
 
 pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
@@ -42,7 +46,8 @@ async fn main() {
 
 async fn async_main() {
     tracing_subscriber::fmt::fmt()
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::INFO)
+        .with_env_filter("mineshare=info")
         .init();
     let args = Args::parse();
     let quota = Quota::per_second(args.rate_limit_recharge).allow_burst(args.rate_limit_burst);
@@ -53,6 +58,9 @@ async fn async_main() {
         &args.server_socket_addr,
         global_counter.clone(),
         router.clone(),
+        args.email,
+        args.prefix,
+        args.prod,
     )
     .await;
     client_handler(&args.client_socket_addr, router.clone()).await;
@@ -73,7 +81,7 @@ async fn async_main() {
             std::process::exit(1);
         }
         if Instant::now() > check {
-            debug!(
+            info!(
                 "Network usage: {}MiB/{}MiB used/max",
                 c / 1024 / 1024,
                 args.max_network
@@ -85,8 +93,16 @@ async fn async_main() {
 }
 
 #[instrument(skip_all)]
-async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Router) {
-    let server_listener = match TcpListener::bind(addr).await {
+async fn server_initial_handler(
+    addr: &str,
+    counter: Arc<AtomicU64>,
+    router: Router,
+    email: String,
+    prefix: String,
+    prod: bool,
+) {
+    let addr = format!("{addr}:443");
+    let server_listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Failed to start listening on server addr `{addr}`: {e}");
@@ -94,15 +110,24 @@ async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Rou
         }
     };
 
+    let tcp_incoming = TcpListenerStream::new(server_listener);
+
+    let mut server_listener = AcmeConfig::new(vec![format!("{prefix}.{}", router.base)])
+        .contact_push(format!("mailto:{email}"))
+        .cache(DirCache::new("tls_certs"))
+        .directory_lets_encrypt(prod)
+        .tokio_incoming(tcp_incoming, vec![b"mineshare".into()]);
+
     tokio::task::spawn(async move {
-        loop {
+        while let Some(tls) = server_listener.next().await {
             let global_counter = counter.clone();
-            let (stream, addr) = server_listener
-                .accept()
-                .await
-                .expect("Accepting client shouldn't fail");
-            info!("Received server spawn request from {addr}");
+            let stream = tls.expect("Shouldn't fail to accept connection");
             let router = router.clone();
+            let Ok(addr) = stream.get_ref().get_ref().0.get_ref().peer_addr() else {
+                error!("Failed to get peer adrr: {addr}");
+                continue;
+            };
+            info!("Received server spawn request from {addr}");
             tokio::task::spawn(server_handler(stream, addr, global_counter, router));
         }
     });
@@ -135,7 +160,6 @@ async fn client_handler(addr: &str, router: Router) {
                     return;
                 }
                 let fut = async {
-                    debug!("Parsing host address from {addr}");
                     loop {
                         match stream.read(&mut data[cursor..]).await {
                             Ok(v) => {
@@ -156,7 +180,7 @@ async fn client_handler(addr: &str, router: Router) {
                             Err(_e) => return Err(()),
                         };
                         if let Some(sender) = router.get_domain(domain).await {
-                            debug!(
+                            info!(
                                 "Read domain from {addr}: {}",
                                 String::from_utf8_lossy(domain)
                             );
@@ -203,7 +227,6 @@ async fn server_play_request_handler(addr: &str, router: Router) {
                 .accept()
                 .await
                 .expect("Failed to listen");
-            debug!("Received server PLAY request from {addr}");
             let router = router.clone();
             tokio::task::spawn(async move {
                 let id = match tokio::time::timeout(Duration::from_secs(5), accepted.read_u128())
@@ -234,8 +257,8 @@ async fn server_play_request_handler(addr: &str, router: Router) {
 }
 
 #[instrument(skip_all)]
-async fn server_handler(
-    mut server_stream: TcpStream,
+async fn server_handler<S: AsyncRead + AsyncWrite + Unpin>(
+    mut server_stream: S,
     addr: SocketAddr,
     counter: Arc<AtomicU64>,
     router: Router,
@@ -247,6 +270,7 @@ async fn server_handler(
             let arr = (prefix.len() as u64).to_be_bytes();
             server_stream.write_all(&arr).await?;
             server_stream.write_all(&prefix).await?;
+            server_stream.flush().await?;
             Ok(prefix)
         };
         let res: Result<Vec<u8>, std::io::Error> = fut.await;
@@ -259,40 +283,116 @@ async fn server_handler(
         };
         (recv, prefix)
     };
-    let mut timeout_at = Instant::now() + Duration::from_secs(90);
-    let mut buf = [0u8; 1024];
+    let timeout_duration = Duration::from_secs(90);
+    let heartbeat_time = Duration::from_secs(5);
+    let mut timeout_at = Instant::now() + timeout_duration;
+    let mut encode_buf = [0u8; 512];
+    let mut decode_buf = [0u8; 512];
+    let mut hb_read = 0;
     let abort = Abort::new();
     let router2 = router.clone();
-    debug!("Setup server_handler for {addr}");
+    info!("Setup server_handler for {addr}");
+    let mut data = [0u8; 32];
+    let mut send_heartbeat_at = Instant::now() + heartbeat_time;
+    rand::rng().fill(&mut data);
     let closure = async move {
         loop {
             select! {
                 _abort = abort.wait() => {
-                    debug!("Server_handler for {addr} aborting due to receiving signal");
+                    info!("Server_handler for {addr} aborting due to receiving signal");
                     return;
                 }
                 _timeout = tokio::time::sleep_until(timeout_at) => {
                     abort.abort();
                     return;
                 }
-                read = server_stream.read(&mut buf) => {
-                    match read {
-                        Ok(_) => {
-                            timeout_at = Instant::now() + Duration::from_secs(90);
+                _heartbeat = tokio::time::sleep_until(send_heartbeat_at) => {
+                    let msg = Message::HeartBeat(data);
+                    let encoded_len = match bincode::encode_into_slice(msg, &mut encode_buf, bincode::config::standard()) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            unreachable!("Serializing heartbeat message should never fail! {e}");
                         },
-                        Err(_e) => {
-                            abort.abort();
-                            return;
-                        },
+                    };
+                    let fut = async {
+                        server_stream.write_u64(encoded_len as u64).await?;
+                        server_stream.write_all(&encode_buf[..encoded_len]).await?;
+                        Ok(())
+                    };
+                    let res: Result<(), std::io::Error> = fut.await;
+                    if let Err(_e) = res {
+                        abort.abort();
+                        return;
+                    }
+                    send_heartbeat_at = Instant::now() + heartbeat_time;
+                }
+                read = server_stream.read(&mut decode_buf[hb_read..]) => {
+                    'blck: {
+                        match read {
+                            Ok(amt) => {
+                                hb_read += amt;
+                                if hb_read < 8 {
+                                    // Haven't read enough to read packet length
+                                    break 'blck;
+                                }
+                                let len: u64 = u64::from_be_bytes(decode_buf[..8].try_into().unwrap());
+                                if hb_read as u64 - 8 < len {
+                                    // Haven't read full packet yet
+                                    break 'blck;
+                                }
+                                let (decoded, _len) = match bincode::decode_from_slice::<Message, _>(&decode_buf[8..hb_read], bincode::config::standard()) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        warn!("Invalid packet send by server {addr}: {e}");
+                                        abort.abort();
+                                        return;
+                                    },
+                                };
+                                let Message::HeartBeatEcho(received_data) = decoded else {
+                                    warn!("Invalid packet send by server {addr}: {decoded:?}");
+                                    abort.abort();
+                                    return;
+                                };
+                                if received_data != data {
+                                    warn!("Invalid echo data server {addr}: {decoded:?}");
+                                    abort.abort();
+                                    break 'blck;
+                                }
+                                decode_buf.copy_within(8+len as usize.., 0);
+                                hb_read -= 8 + len as usize;
+                                timeout_at = Instant::now() + timeout_duration;
+                                send_heartbeat_at = Instant::now() + heartbeat_time;
+                                rand::rng().fill(&mut data);
+                            },
+                            Err(_e) => {
+                                abort.abort();
+                                return;
+                            },
+                        }
                     }
                 }
                 recved = new_client_recv.recv() => {
-                    debug!("Server {addr} received new client");
+                    info!("Server {addr} received new client");
                     let clientconn = recved.expect("Sender side should be in the map");
                     let counter = counter.clone();
                     let (send, recv) = oneshot::channel();
                     let id = router2.add_random_id(send).await;
-                    if server_stream.write_u128(id).await.is_err() {
+                    let msg = Message::NewClient(id);
+                    let mut buf = [0u8; 32];
+                    let len = match bincode::encode_into_slice(msg, &mut buf, bincode::config::standard()) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            unreachable!("Encoding new client message should never fail! {e}");
+                        },
+                    };
+                    let fut = async {
+                        server_stream.write_u64(len as u64).await?;
+                        server_stream.write_all(&buf[..len]).await?;
+                        server_stream.flush().await?;
+                        Ok(())
+                    };
+                    let res: Result<(), std::io::Error> = fut.await;
+                    if let Err(_e) = res {
                         abort.abort();
                         return;
                     }
@@ -632,17 +732,25 @@ struct Args {
     /// The base domain of the proxy.
     /// Ex: If example.com is given, the generated urls will look like word-word-word.example.com
     base_domain: String,
-    /// The TCP listener address that clients can use to join the proxied server
+    /// The email used for ACME certs
+    email: String,
+    /// The prefix used by server when connecting to the proxy.
+    /// The ACME cert will be reqested with <`prefix`>.<`base_domain`>.
+    #[arg(long, default_value = "mc")]
+    prefix: String,
+    /// The TCP listener IP:PORT that clients can use to join the proxied server
     /// It is recommended to leave this as the default
     #[arg(long, default_value = "0.0.0.0:25565")]
     client_socket_addr: String,
-    /// The TCP listener address that the server uses to setup the initial connection with the proxy
+    /// The TCP listener IP address ONLY that the server uses to setup the initial connection with the proxy
+    /// This uses port 443 so it can piggy back off of Lets Encrypt TLS cert for E2E connection between server
+    /// and proxy
+    /// It is recommended to leave this as the default
+    #[arg(long, default_value = "0.0.0.0")]
+    server_socket_addr: String,
+    /// The TCP listener IP:PORT that the server uses to setup the duplex connection with the client stream
     /// It is recommended to leave this as the default
     #[arg(long, default_value = "0.0.0.0:25564")]
-    server_socket_addr: String,
-    /// The TCP listener address that the server uses to setup the duplex connection with the client stream
-    /// It is recommended to leave this as the default
-    #[arg(long, default_value = "0.0.0.0:25563")]
     server_play_socket_addr: String,
     /// Approximate network transfer limit in MiB. After this limit is reached, the server will
     /// shut down all connections.
@@ -654,4 +762,7 @@ struct Args {
     /// The burst limit for each IP address. This is the MAX # of burst connections that can be made from each IP in a second.
     #[arg(long, default_value = "10")]
     rate_limit_burst: NonZeroU32,
+    /// Whether this should connect to the ACTUAL Lets Encrypt production server
+    #[arg(long, default_value_t = false)]
+    prod: bool,
 }

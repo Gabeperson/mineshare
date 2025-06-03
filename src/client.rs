@@ -1,13 +1,16 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
-use std::{io::ErrorKind, net::SocketAddr, str::FromStr as _, sync::Arc, time::Duration};
+use mineshare::Message;
+use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+use std::{io::ErrorKind, net::SocketAddr, str::FromStr as _, sync::Arc};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt},
-    net::{TcpStream, tcp::OwnedReadHalf},
+    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
     select,
 };
-use tracing::{error, info};
+use tokio_rustls::TlsConnector;
+use tracing::{Level, error, info};
 
 const DEFAULT_URL: &str = "mc.mineshare.dev";
 
@@ -17,21 +20,44 @@ async fn main() {
 }
 
 async fn async_main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::fmt()
+        .with_max_level(Level::INFO)
+        .init();
     let args = Args::parse();
     info!("Starting proxy connection");
-    let mut proxy_conn = match TcpStream::connect(&format!(
-        "{}:{}",
-        args.proxy_server, args.proxy_server_connection_port
-    ))
-    .await
-    {
+    let proxy_conn = match TcpStream::connect(&format!("{}:443", &args.proxy_server)).await {
         Ok(l) => l,
         Err(e) => {
             error!(
                 "Failed to connect to proxy server `{}`: {e}",
                 args.proxy_server
             );
+            std::process::exit(1);
+        }
+    };
+    let root_store = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+    };
+    let mut rustls_config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    rustls_config.alpn_protocols = vec![b"mineshare".into()];
+    let rustls_config = Arc::new(rustls_config);
+
+    let server_name: ServerName = match args.proxy_server.clone().try_into() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Invalid proxy server domain `{}`: {e}", args.proxy_server);
+            std::process::exit(1);
+        }
+    };
+    let mut proxy_conn = match TlsConnector::from(rustls_config)
+        .connect(server_name, proxy_conn)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create TLS connection with proxy server: {e}");
             std::process::exit(1);
         }
     };
@@ -62,34 +88,64 @@ async fn async_main() {
     };
     info!("Fetched Url");
     info!("Proxy url: {domain}");
-    let (recv, mut send) = proxy_conn.into_split();
-    tokio::task::spawn(async move {
-        loop {
-            if let Err(e) = send.write_all(b"heartbeat").await {
-                error!("Failed to heartbeat server: {e}");
-                std::process::exit(1);
-            }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
 
-    _ = tokio::task::spawn(main_loop(recv, args));
+    _ = tokio::task::spawn(main_loop(proxy_conn, args));
     tokio::signal::ctrl_c().await.unwrap();
 }
 
-async fn main_loop(mut recv: OwnedReadHalf, args: Args) {
+async fn main_loop<S: AsyncRead + AsyncWrite + Unpin>(mut conn: S, args: Args) {
     let proxy_play: Arc<str> = Arc::from(format!(
         "{}:{}",
         args.proxy_server, args.proxy_server_play_port
     ));
+    let mut buf = [0u8; 512];
+    let mut read_amt = 0;
     loop {
-        let id = match recv.read_u128().await {
-            Ok(id) => id,
+        match conn.read(&mut buf[read_amt..]).await {
+            Ok(read) => {
+                read_amt += read;
+            }
             Err(e) => {
                 error!("Server disconnected: {e}");
                 std::process::exit(1);
             }
+        }
+        if read_amt < 8 {
+            // Can't read length yet
+            continue;
+        }
+        let len = u64::from_be_bytes(buf[..8].try_into().unwrap());
+        if read_amt - 8 < len as usize {
+            // Can't read body of msg yet
+            continue;
+        }
+        let (msg, _len) = match bincode::decode_from_slice::<Message, _>(
+            &buf[8..8 + len as usize],
+            bincode::config::standard(),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Server sent message that couldn't be decoded: {e}");
+                std::process::exit(1);
+            }
         };
+        buf.copy_within(8 + len as usize.., 0);
+        read_amt -= 8 + len as usize;
+        let id = match msg {
+            Message::HeartBeat(data) => {
+                if let Err(e) = send_heartbeat(&mut conn, data).await {
+                    error!("Writing heartbeat echo to server failed: {e}");
+                    std::process::exit(1);
+                }
+                continue;
+            }
+            Message::HeartBeatEcho(_) => {
+                error!("Proxy server sent ECHO?");
+                std::process::exit(1);
+            }
+            Message::NewClient(id) => id,
+        };
+
         info!("Server sent request with id: {id}");
         // let addr = args.proxy_server_play.clone();
         let proxy_play = proxy_play.clone();
@@ -134,6 +190,22 @@ async fn main_loop(mut recv: OwnedReadHalf, args: Args) {
             handle_duplex(proxy_stream, server_addr, server_stream).await;
         });
     }
+}
+
+async fn send_heartbeat<S: AsyncWrite + AsyncRead + Unpin>(
+    conn: &mut S,
+    data: [u8; 32],
+) -> Result<(), std::io::Error> {
+    let mut buf = [0u8; 64];
+    let encoded_len = bincode::encode_into_slice(
+        Message::HeartBeatEcho(data),
+        &mut buf,
+        bincode::config::standard(),
+    )
+    .expect("Serializing hearteat response should never fail!");
+    conn.write_u64(encoded_len as u64).await?;
+    conn.write_all(&buf[..encoded_len]).await?;
+    Ok(())
 }
 
 async fn handle_duplex(
@@ -256,15 +328,10 @@ struct Args {
     /// The proxy server URL. Leave blank to connect to the default proxy.
     #[arg(long, default_value = DEFAULT_URL)]
     proxy_server: String,
-    /// The proxy server's server connect port. This is the port that the host server
-    /// initially connects to, to request the server to assign it a proxied url
-    /// Leave blank to connect to the default port
-    #[arg(long, default_value_t = 25564)]
-    proxy_server_connection_port: u16,
     /// The proxy server's PLAY port. This is the port that the host server
     /// connects to once requested by the proxy server, to start proxying the connection.
     /// Leave blank to connect to the default port
-    #[arg(long, default_value_t = 25563)]
+    #[arg(long, default_value_t = 25564)]
     proxy_server_play_port: u16,
     /// The MC server that you want to proxy.
     server_socket_addr: String,

@@ -36,7 +36,7 @@ a custom server, see the --help menu of the app.
    Proxy connection completed
    Fetching url
    Fetched Url
-   Proxy url: word-word-word.mineshare.dev
+   Proxy url: a_word-a_word-a_word.mineshare.dev
    ```
 
    The people you want connecting to your server can now use the url given to connect to your server.
@@ -51,18 +51,43 @@ It is rate-limited, but it may go down if people are using it too much.
 Unfortunately I do not have enough funds for a good one, nor to host multiple in multiple regions, so you may get
 bad pings or multiple disconnects if you wish to use the public server.
 
-
-## Self hosting the server
+## Self hosting the proxy server
 
 Self hosting the server is pretty easy. You just need to setup 1 DNS records, point them at your server,
-and people will be able to use it.
+open a few ports and people will be able to use it.
 
 You need to decide on a "base domain", which is the `mineshare.dev` in word-word-word.mineshare.dev,
+and a "prefix", which is the prefix of the domain that the server will connect to. I recommend using "mc" for the prefix,
+which is already set as the default (This means the server will connect to the proxy using the url `mc.<your base domain>`)
 then you need to proxy anything from `*.<your base domain>`, in this case `*.mineshare.dev`, to your
 server.
 
-Then run the server with the base domain and it should work.
+Then you open the ports `443`, `25564`, and `25565`.
+
+Then run the server with the base domain and email info (for LetsEncrypt), and it should start running.
 There are also some other utilities in the CLI arguments if you would like to modify some things.
+
+## How does it work
+
+The server first starts 3 listeners.
+
+1. Listener for the initial server connection
+2. Listener for client
+3. Listener for server "PLAY" requests
+
+When a server wants to be proxied, it will connect to the initial server connection listener on the proxy server
+using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
+from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
+Since there's 3 words, it is HIGHLY unlikely ($1/7776^3$ or $~2.13e-10%$) for any malicious users to guess a server id.
+Then the proxy server sends this to the server, which will display it.
+
+Once a client connects with this server ID, it is matched to the correct server, and the server is sent a client ID, which is a 128-bit randomly generated number.
+The server then initiates another TCP TLS request to the server, again on 443, then sends the client ID.
+The server also creates a connection to the MC server.
+Once the ID is sent, both the server and client cancel the TLS, and they begin proxying their respective connections:
+
+- The proxy looks up the ID, and connects the waiting client with the server connection (now non-tls)
+- The server connects the now non-tls'd connection to the proxy to the actual MC server stream.
 
 ## Contributions
 

@@ -2,6 +2,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::missing_errors_doc)]
 
+use bincode::{Decode, Encode};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::num::NonZero;
@@ -11,6 +12,13 @@ pub mod wordlist;
 
 pub const LIMIT_MEGABYTE_PER_SECOND: NonZero<u32> = NonZero::new(128 * 1024).unwrap();
 pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum Message {
+    HeartBeat([u8; 32]),
+    HeartBeatEcho([u8; 32]),
+    NewClient(u128),
+}
 
 pub fn try_parse_init_packet(
     buf: &[u8],
