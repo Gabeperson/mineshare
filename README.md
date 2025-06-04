@@ -9,7 +9,7 @@ Essentially, it lets you _share_ your *mine*craft servers without much setup oth
 By default, the mineshare app will use the public server. If you want to connect to
 a custom server, see the `--help` menu of the app.
 
-### Installation:
+#### Installation:
 <details>
 <summary>Download the appropriate executable that starts with `mineshare` (not `mineshare-server`)
    from the GitHub releases or via another method.</summary>
@@ -22,7 +22,7 @@ a custom server, see the `--help` menu of the app.
 </details>
 
 
-### Setup the Minecraft server:
+#### Setup the Minecraft server:
 
 <details>
 <summary>Setup the local Minecraft server you will be using and note down its port number.</summary>
@@ -33,7 +33,7 @@ a custom server, see the `--help` menu of the app.
 
 </details>
 
-### Start the connection server:
+#### Start the connection server:
 
 Open the command line and run mineshare with the argument of ip:port.
    Use the full executable name (ex: `mineshare-x86_64-pc-windows-msvc.exe`).
@@ -70,13 +70,13 @@ Fetched Url
 Proxy url: <word>-<word>-<word>.mineshare.dev
 ```
 
-### Connect to the server:
+#### Connect to the server:
 
 Both you and your friends can use that URL (`<word>-<word>-<word>.mineshare.dev`) to connect to the server in minecraft. Just type it into direct connect and join the server
 
 
 
-### Shutting down the connection:
+#### Shutting down the connection:
 
 Once you exit the mineshare application, all connected players will disconnect. No other work is required.
 
