@@ -12,23 +12,27 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cargo: cargo
+            ext: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             cargo: cross
-
+            ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             cargo: cargo
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             cargo: cargo
-
+            ext: ""
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cargo: cargo
+            ext: ".exe"
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             cargo: cargo
+            ext: ".exe"
 
     steps:
       - name: Checkout
@@ -62,26 +66,20 @@ jobs:
         run: |
           ${{ matrix.cargo }} build --release --target ${{ matrix.target }}
 
-      # - name: Package
-      #   run: |
-      #     mkdir -p dist
-      #     cp target/${{ matrix.target }}/release/mineshare${{ matrix.ext }} dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-      #     cp target/${{ matrix.target }}/release/mineshare_server${{ matrix.ext }} dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/mineshare${{ matrix.ext }} dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
+          cp target/${{ matrix.target }}/release/mineshare_server${{ matrix.ext }} dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path:
-            target/${{ matrix.target }}/release/*
-            # dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-            # dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+          path: dist/*
 
       - name: Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files:
-            target/${{ matrix.target }}/release/*
-            # dist/mineshare-${{ matrix.target }}${{ matrix.ext }}
-            # dist/mineshare_server-${{ matrix.target }}${{ matrix.ext }}
+          files: dist/*
