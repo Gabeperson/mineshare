@@ -18,13 +18,17 @@ pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
 pub enum Message {
     HeartBeat([u8; 32]),
     HeartBeatEcho([u8; 32]),
-    NewClient(u128, [u8; 32]),
+    NewClient(u128),
 }
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct DomainAndPubKey(pub String, pub [u8; 32]);
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Addr(pub SocketAddr);
 
 impl BincodeAsync<'_> for Message {}
+impl BincodeAsync<'_> for DomainAndPubKey {}
 impl BincodeAsync<'_> for Addr {}
 
 // TODO use these impls in server & client

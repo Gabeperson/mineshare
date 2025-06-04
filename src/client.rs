@@ -2,9 +2,9 @@
 #![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
-use mineshare::{Addr, BincodeAsync as _, Message, dhauth::AuthenticatorServer};
+use mineshare::{Addr, BincodeAsync as _, DomainAndPubKey, Message, dhauth::AuthenticatorServer};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{io::ErrorKind, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -64,37 +64,29 @@ async fn async_main() {
     };
     info!("Proxy connection completed");
     info!("Fetching Url");
-    let mut u64_buf = [0u8; 8];
-    let domain_fut = async {
-        proxy_conn.read_exact(&mut u64_buf).await?;
-        let len = u64::from_be_bytes(u64_buf) as usize;
-        let mut domain_buf = vec![0u8; 256];
-        let len = proxy_conn.read_exact(&mut domain_buf[..len]).await?;
-        domain_buf.truncate(len);
-        let s = match String::from_utf8(domain_buf) {
-            Ok(s) => s,
+    let mut v = vec![0u8; 512];
+    let DomainAndPubKey(domain, alice_pubkey) =
+        match DomainAndPubKey::parse(&mut proxy_conn, &mut v).await {
+            Ok(d) => d,
             Err(e) => {
-                return Err(std::io::Error::new(ErrorKind::InvalidData, e));
+                error!("Failed to fetch domain from proxy server: {e}");
+                std::process::exit(1);
             }
         };
-        Ok(s)
-    };
-    let domain: Result<String, std::io::Error> = domain_fut.await;
-    let domain = match domain {
-        Ok(d) => d,
-        Err(e) => {
-            error!("Failed to read domain from proxy sever: {e}");
-            std::process::exit(1);
-        }
-    };
+    drop(v);
     info!("Fetched Url");
     info!("Proxy url: {domain}");
 
-    _ = tokio::task::spawn(main_loop(proxy_conn, args));
+    _ = tokio::task::spawn(main_loop(proxy_conn, args, alice_pubkey));
     tokio::signal::ctrl_c().await.unwrap();
 }
 
-async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: Args) {
+async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    mut conn: S,
+    args: Args,
+    alice_pubkey: [u8; 32],
+) {
+    let pubkey = VerifyingKey::from_bytes(&alice_pubkey).expect("Server send invalid public key?");
     let proxy_play: Arc<str> = Arc::from(format!(
         "{}:{}",
         args.proxy_server, args.proxy_server_play_port
@@ -108,7 +100,7 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: 
                 std::process::exit(1);
             }
         };
-        let (id, pubkey) = match msg {
+        let id = match msg {
             Message::HeartBeat(data) => {
                 let mut buf = [0u8; 128];
                 if let Err(e) = Message::HeartBeatEcho(data)
@@ -124,7 +116,7 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: 
                 error!("Proxy server sent ECHO?");
                 std::process::exit(1);
             }
-            Message::NewClient(id, pkey) => (id, pkey),
+            Message::NewClient(id) => id,
         };
 
         info!("Server sent request with id: {id}");
@@ -162,8 +154,7 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: 
             };
             let auth = AuthenticatorServer {
                 inner: &mut proxy_stream,
-                alice_public_sign_key: VerifyingKey::from_bytes(&pubkey)
-                    .expect("Assume the server gives us valid keys. No reason it wouldn't"),
+                alice_public_sign_key: pubkey,
             };
             if let Err(e) = auth.send_id(id).await {
                 error!("Failed to send ID to server: {e}");

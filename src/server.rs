@@ -12,7 +12,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
 };
 use mineshare::{
-    Addr, BincodeAsync as _, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
+    Addr, BincodeAsync as _, DomainAndPubKey, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
     dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
@@ -296,30 +296,26 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     router: Router,
     verifying_key: VerifyingKey,
 ) {
+    let mut decode_buf = [0u8; 512];
     let (mut new_client_recv, prefix) = {
         let (send, recv) = mpsc::channel(10);
-        let fut = async {
-            let prefix = router.add_server(send).await;
-            let arr = (prefix.len() as u64).to_be_bytes();
-            server_stream.write_all(&arr).await?;
-            server_stream.write_all(&prefix).await?;
-            server_stream.flush().await?;
-            Ok(prefix)
-        };
-        let res: Result<Vec<u8>, std::io::Error> = fut.await;
-        let prefix = match res {
+        let prefix = router.add_server(send).await;
+        let wrote = match DomainAndPubKey(prefix.clone(), verifying_key.to_bytes())
+            .encode(&mut server_stream, &mut decode_buf)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 info!("Error sending domain to {addr}: {e}");
                 return;
             }
         };
+        counter.fetch_add(wrote as u64, Ordering::Relaxed);
         (recv, prefix)
     };
     let timeout_duration = Duration::from_secs(90);
     let heartbeat_time = Duration::from_secs(5);
     let mut timeout_at = Instant::now() + timeout_duration;
-    let mut decode_buf = [0u8; 512];
     let mut hb_read = 0;
     let abort = Abort::new();
     let router2 = router.clone();
@@ -355,6 +351,12 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 read = server_stream.read(&mut decode_buf[hb_read..]) => {
                     'blck: {
                         match read {
+
+                            Ok(0) => {
+                                abort.abort();
+                                _ = server_stream.shutdown();
+                                return;
+                            },
                             Ok(amt) => {
                                 const PACKET_LENGTH_BYTES: usize = 4;
                                 hb_read += amt;
@@ -405,7 +407,7 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     let counter = counter.clone();
                     let (send, recv) = oneshot::channel();
                     let id = router2.add_random_id(send).await;
-                    let msg = Message::NewClient(id, verifying_key.to_bytes());
+                    let msg = Message::NewClient(id);
                     let mut buf = [0u8; 256];
                     match msg.encode(&mut server_stream, &mut buf).await {
                         Ok(l) => {
@@ -423,8 +425,8 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
     closure.await;
-    info!("Removing {} from map", String::from_utf8_lossy(&prefix));
-    router.remove_prefix(&prefix).await;
+    info!("Removing {} from map", prefix);
+    router.remove_prefix(prefix.as_bytes()).await;
 }
 
 #[instrument(skip_all)]
@@ -632,14 +634,14 @@ impl Router {
         locked.insert(ip, Limiter::direct(self.quota));
         false
     }
-    async fn add_server(&self, send: mpsc::Sender<ClientConn>) -> Vec<u8> {
+    async fn add_server(&self, send: mpsc::Sender<ClientConn>) -> String {
         let mut locked = self.domain_map.write().await;
         let mut prefix = get_random_prefix(&*locked);
         prefix.push('.');
         prefix.push_str(&self.base);
         locked.insert(prefix.clone().into(), send);
         trace!("Adding server with prefix {prefix}");
-        prefix.into_bytes()
+        prefix
     }
     async fn add_random_id(&self, send: oneshot::Sender<ServerPlayConn>) -> u128 {
         let mut map = self.play_connect_map.write().await;

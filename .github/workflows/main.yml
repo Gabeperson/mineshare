@@ -52,6 +52,12 @@ jobs:
           sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
           export RUSTFLAGS="-C target-feature=+crt-static"
 
+      - name: export env vars for aarch64 linux
+        if: contains(matrix.target, 'musl') && contains(matrix.target, 'aarch64')
+        run: |
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+          export CC=aarch64-linux-gnu-gcc
+
       - name: Build
         run: |
           ${{ matrix.cargo }} build --release --target ${{ matrix.target }}
