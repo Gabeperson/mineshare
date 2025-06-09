@@ -127,7 +127,7 @@ The proxy then starts 3 TCP listeners.
 When a server wants to be proxied, it will connect to the initial server connection listener on the proxy
 using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
 from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
-Since there's 3 words, it is HIGHLY unlikely ($\frac{1}{7776^3}$ or ~$`2.13*10^{-10}\%`$ chance) for any malicious users to guess a server id.
+Since there's 3 words, it is HIGHLY unlikely ($\frac{1}{7776^3}$ or ~$`2.13*10^{-10}\%`$ chance per guess) for any malicious users to guess a server id.
 Then the proxy sends this to the server, which will display it. It also sends the ed25519 public key, which is used later for
 authenticating the server.
 
