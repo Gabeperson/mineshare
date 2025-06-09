@@ -128,17 +128,18 @@ When a server wants to be proxied, it will connect to the initial server connect
 using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
 from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
 Since there's 3 words, it is HIGHLY unlikely ($\frac{1}{7776^3}$ or ~$`2.13*10^{-10}\%`$ chance) for any malicious users to guess a server id.
-Then the proxy sends this to the server, which will display it.
+Then the proxy sends this to the server, which will display it. It also sends the ed25519 public key, which is used later for
+authenticating the server.
 
 Once a client connects to the proxy with this server ID, the proxy parses the "hello" packet for the hostname.
 Using this hostname, the client is matched to the correct server, and the server is sent a client ID,
-which is a 128-bit randomly generated number, and also the ed25519 verification key.
+which is a 128-bit randomly generated number.
 The server then initiates another TCP request to the server, this time on a custom port (default 25564), and performs
 an authenticated diffie-hellman exchange using the ed25519 verification key from before.
 Using this shared secret and aes-gcm-siv, it encrypts the 128-bit ID and sends it over.
 
 By doing this, we can ensure that no MITM can happen. See the `dhauth` module in the `src/lib.rs` file for more details
-(Is there an easier & better way of doing this? Probably. Oh well, it works)
+(Is there an easier & better way of doing this? Probably. But it works, and it's secure, so :shrug:)
 
 The proxy then decrypts this aes-gcm-siv encrypted ID using its own shared secret and connects the client stream and the server stream.
 The server also creates a connection to the MC server.
@@ -148,3 +149,5 @@ Now there is a duplex connection from the client to the MC server, and we can ju
 ## Contributions
 
 Are welcome!
+
+(Except for contributions that are AI-generated. Please don't.)
