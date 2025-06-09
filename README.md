@@ -17,7 +17,7 @@ a custom server, see the `--help` menu of the app.
 - If you are on Windows, you will probably want `mineshare-x86_64-pc-windows-msvc.exe` 
   - If you know you're on an ARM cpu, you should go for `mineshare-x86_64-pc-windows-msvc.exe`
 - If you are on macOS, you will probably want `mineshare-aarch64-apple-darwin` executable.
-  - If you're on _intel_ macOS, you will want `mineshare-mineshare-x86_64-apple-darwin`
+  - If you're on _intel_ macOS, you will want `mineshare-x86_64-apple-darwin`
 - If you are on linux, you probably know which one to get (They're both built with musl)
 </details>
 
@@ -39,7 +39,7 @@ Open the command line and run mineshare with the argument of ip:port.
    Use the full executable name (ex: `mineshare-x86_64-pc-windows-msvc.exe`).
 
 ```BASH
-$ mineshare-<ver> <ip-address>:<port>
+$ mineshare-<arch> <ip-address>:<port>
 ```
 If you are hosting the server on your computer, you will want to use
      `localhost` as your ip.
@@ -48,13 +48,13 @@ If you are hosting the server on your computer, you will want to use
 Hosting on your own computer with port 25565:
 
 ```BASH
-$ mineshare localhost:25565
+$ mineshare-<arch> localhost:25565
 ```
 <br>
 Hosting on another computer that has IP 192.168.1.60 on port 5930:
 
 ```BASH
-$ mineshare 192.168.1.60:5930
+$ mineshare-<arch> 192.168.1.60:5930
 ```
 </details>
 <br>
