@@ -90,12 +90,12 @@ async fn async_main() {
     if protocol_version != PROTOCOL_VERSION {
         if protocol_version < PROTOCOL_VERSION {
             error!(
-                "Server's protocol version is too low! You are on `{PROTOCOL_VERSION}` but server is on `{protocol_version}`! Ask your server maintainer to upgrade if they can!"
+                "Proxy server's protocol version is too low! You are on `{PROTOCOL_VERSION}` but proxy is on `{protocol_version}`! Ask the maintainer to upgrade if they can!"
             );
             std::process::exit(1);
         } else {
             error!(
-                "Server's protocol version is too high! You are on `{PROTOCOL_VERSION}` but server is on `{protocol_version}`! Try upgrading your local `mineshare` version and try again!"
+                "Proxy server's protocol version is too high! You are on `{PROTOCOL_VERSION}` but proxy is on `{protocol_version}`! Try upgrading your local `mineshare` version to the latest version and try again!"
             );
             std::process::exit(1);
         }
