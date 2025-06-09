@@ -1,6 +1,6 @@
 # mineshare
 
-mineshare is a simple, no portforwarding proxy app for small Minecraft servers
+mineshare is a simple, no portforwarding proxy app for small Minecraft servers (1.8.x-1.21.x)
 
 Essentially, it lets you _share_ your *mine*craft servers without much setup other than running one executable.
 
@@ -11,7 +11,7 @@ a custom server, see the `--help` menu of the app.
 
 #### Installation:
 <details>
-<summary>Download the appropriate `mineshare-<architecture>` executable
+<summary>Download the appropriate mineshare-&ltarchitecture&gt executable
    from the GitHub releases or via another method.</summary>
 
 - If you are on Windows, you will probably want `mineshare-x86_64-pc-windows-msvc.exe` 
@@ -97,6 +97,9 @@ I might work on getting a more powerful server/multiple servers in the future, b
 
 Self hosting the server is pretty easy. You just need to setup 1 DNS records, point them at your server,
 open a few ports and people will be able to use it.
+
+Github releases dont contain a binary build for the server, but CI builds them every commit and you can download from the
+artifacts or compile it on your own.
 
 You need to decide on a "base domain", which is the `mineshare.dev` in word-word-word.mineshare.dev,
 and a "prefix", which is the prefix of the domain that the server will connect to. I recommend using "mc" for the prefix,

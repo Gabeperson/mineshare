@@ -11,7 +11,7 @@ use governor::{
 };
 use mineshare::{
     Addr, BincodeAsync as _, DomainAndPubKey, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
-    dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
+    ServerHello, dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
 use rustls_acme::{AcmeConfig, caches::DirCache};
@@ -295,6 +295,14 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     verifying_key: VerifyingKey,
 ) {
     let mut decode_buf = [0u8; 512];
+    if receive_server_hello(&mut server_stream, &mut decode_buf)
+        .await
+        .is_err()
+    {
+        // This isn't a proper server, it's just sending malformed data or isnt sending data at all.
+        // So we just ignore them
+        return;
+    }
     let (mut new_client_recv, prefix) = {
         let (send, recv) = mpsc::channel(10);
         let prefix = router.add_server(send).await;
@@ -318,7 +326,7 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut hb_read = 0;
     let abort = Abort::new();
     let router2 = router.clone();
-    info!("Setup server_handler for {addr}");
+    info!("Setup server_handler for {addr} (Passed server hello)");
     let mut data = [0u8; 32];
     let mut send_heartbeat_at = Instant::now() + heartbeat_time;
     rand::rng().fill(&mut data);
@@ -734,6 +742,18 @@ fn get_random_id<T>(map: &HashMap<u128, oneshot::Sender<T>>) -> u128 {
         n = rng.random();
     }
     n
+}
+
+async fn receive_server_hello<S: AsyncRead + Unpin + Send>(
+    stream: &mut S,
+    buf: &mut [u8],
+) -> Result<(), ()> {
+    let fut = ServerHello::parse(stream, buf);
+    let fut = tokio::time::timeout(Duration::from_secs(5), fut);
+    match fut.await {
+        Ok(Ok(serverhello)) if serverhello.0 == "mineshare" => Ok(()),
+        _ => Err(()),
+    }
 }
 
 #[derive(Debug, Clone)]

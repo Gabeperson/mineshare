@@ -2,7 +2,9 @@
 #![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
-use mineshare::{Addr, BincodeAsync as _, DomainAndPubKey, Message, dhauth::AuthenticatorServer};
+use mineshare::{
+    Addr, BincodeAsync as _, DomainAndPubKey, Message, ServerHello, dhauth::AuthenticatorServer,
+};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
@@ -63,8 +65,16 @@ async fn async_main() {
         }
     };
     info!("Proxy connection completed");
-    info!("Fetching Url");
+    info!("Sending initial hello to proxy server");
     let mut v = vec![0u8; 512];
+    if let Err(e) = ServerHello("mineshare")
+        .encode(&mut proxy_conn, &mut v)
+        .await
+    {
+        eprintln!("Error sending server hello to proxy server: {e}");
+    }
+    info!("Sent initial hello to proxy server");
+    info!("Fetching Url");
     let DomainAndPubKey(domain, alice_pubkey) =
         match DomainAndPubKey::parse(&mut proxy_conn, &mut v).await {
             Ok(d) => d,

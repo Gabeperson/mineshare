@@ -27,11 +27,15 @@ pub struct DomainAndPubKey(pub String, pub [u8; 32]);
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Addr(pub SocketAddr);
 
+#[derive(Debug, Clone, Encode, BorrowDecode)]
+pub struct ServerHello<'a>(pub &'a str);
+
+impl<'a> BincodeAsync<'a> for ServerHello<'a> {}
+
 impl BincodeAsync<'_> for Message {}
 impl BincodeAsync<'_> for DomainAndPubKey {}
 impl BincodeAsync<'_> for Addr {}
 
-// TODO use these impls in server & client
 pub trait BincodeAsync<'a>: BorrowDecode<'a, ()> + Encode + Send {
     fn encode<S: AsyncWrite + Unpin + Send>(
         self,
