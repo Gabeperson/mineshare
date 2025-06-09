@@ -11,7 +11,7 @@ a custom server, see the `--help` menu of the app.
 
 #### Installation:
 <details>
-<summary>Download the appropriate executable that starts with `mineshare` (not `mineshare-server`)
+<summary>Download the appropriate `mineshare-<architecture>` executable
    from the GitHub releases or via another method.</summary>
 
 - If you are on Windows, you will probably want `mineshare-x86_64-pc-windows-msvc.exe` 
