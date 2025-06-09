@@ -1,8 +1,6 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 
-// TODO: add to counter more times
-// TODO: more timeouts on client and server side stuff
 use clap::Parser;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use governor::{
@@ -216,7 +214,7 @@ async fn client_handler(addr: &str, router: Router) {
                         return Err(());
                     }
                 };
-                let timeout = tokio::time::timeout(Duration::from_secs(15), fut);
+                let timeout = tokio::time::timeout(Duration::from_secs(5), fut);
                 match timeout.await {
                     Ok(Ok(())) => {
                         info!("client {addr} sent to handler thread");
@@ -315,6 +313,7 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
     let timeout_duration = Duration::from_secs(90);
     let heartbeat_time = Duration::from_secs(5);
+    let send_timeout = Duration::from_secs(5);
     let mut timeout_at = Instant::now() + timeout_duration;
     let mut hb_read = 0;
     let abort = Abort::new();
@@ -337,7 +336,15 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 _heartbeat = tokio::time::sleep_until(send_heartbeat_at) => {
                     let msg = Message::HeartBeat(data);
                     let mut buf = [0u8; 64];
-                    match msg.encode(&mut server_stream, &mut buf).await {
+                    let res = match tokio::time::timeout(send_timeout, msg.encode(&mut server_stream, &mut buf)).await {
+                        Ok(r) => r,
+                        Err(_e) => {
+                            warn!("Server {addr} did not receive heartbeat in time");
+                            abort.abort();
+                            return;
+                        },
+                    };
+                    match res {
                         Ok(l) => {
                             counter.fetch_add(l as u64, Ordering::Relaxed);
                         }
@@ -349,6 +356,7 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     send_heartbeat_at = Instant::now() + heartbeat_time;
                 }
                 read = server_stream.read(&mut decode_buf[hb_read..]) => {
+                    // This is intentionally written to be nonblocking so we don't need to care about timeouts
                     'blck: {
                         match read {
 
@@ -481,6 +489,7 @@ async fn handle_duplex(
         data,
         addr: client_addr,
     } = client_conn;
+    info!("Starting duplex conn. between server {server_addr} and client {client_addr}");
     let mut buf = vec![0u8; 128];
     match Addr(client_addr).encode(&mut server_stream, &mut buf).await {
         Ok(len) => {
@@ -732,20 +741,30 @@ struct DisconnectMessage<T: std::fmt::Display>(T);
 
 impl<T: std::fmt::Display> DisconnectMessage<T> {
     async fn encode<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> Result<(), std::io::Error> {
-        const DISCONNECT_PACKET_ID: &[u8] = &[0];
-        let s = format!(r#"{{"text":"{}"}}"#, self.0);
-        trace!("Sending debug message: {s}");
-        let s_len = s.len();
-        let (arr, len) = varint::encode_varint(s_len as u64);
-        let (arr2, len2) =
-            varint::encode_varint((DISCONNECT_PACKET_ID.len() + len + s.len()) as u64);
-        let mut writer = BufWriter::new(writer);
-        writer.write_all(&arr2[..len2]).await?;
-        writer.write_all(DISCONNECT_PACKET_ID).await?;
-        writer.write_all(&arr[..len]).await?;
-        writer.write_all(s.as_bytes()).await?;
-        writer.flush().await?;
-        Ok(())
+        let res = async {
+            const DISCONNECT_PACKET_ID: &[u8] = &[0];
+            let s = format!(r#"{{"text":"{}"}}"#, self.0);
+            trace!("Sending debug message: {s}");
+            let s_len = s.len();
+            let (arr, len) = varint::encode_varint(s_len as u64);
+            let (arr2, len2) =
+                varint::encode_varint((DISCONNECT_PACKET_ID.len() + len + s.len()) as u64);
+            let mut writer = BufWriter::new(writer);
+            writer.write_all(&arr2[..len2]).await?;
+            writer.write_all(DISCONNECT_PACKET_ID).await?;
+            writer.write_all(&arr[..len]).await?;
+            writer.write_all(s.as_bytes()).await?;
+            writer.flush().await?;
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), res)
+            .await
+            .map_err(|_e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Sending Disconnect took too long",
+                )
+            })?
     }
 }
 
