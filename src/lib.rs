@@ -13,30 +13,61 @@ pub mod wordlist;
 
 pub const LIMIT_MEGABYTE_PER_SECOND: NonZero<u32> = NonZero::new(128 * 1024).unwrap();
 pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
+pub const PROTOCOL_VERSION: u64 = 1;
 
+/// Messages transferred through the initial TLS stream between proxy and server
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Message {
+    /// Proxy request to server to echo back these bytes
     HeartBeat([u8; 32]),
+    /// Server response to heartbeat request, echoing back requested bytes
     HeartBeatEcho([u8; 32]),
+    /// Request from proxy to server telling server to open the TCP stream that the client connection will
+    /// be proxied through.
     NewClient(u128),
 }
 
+/// Initial message from proxy to server telling server the domain it is assigned, the proxy's public key,
+/// and the proxy server's protocol number. This protocol number will be incremented every time the protocol changes.
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct DomainAndPubKey(pub String, pub [u8; 32]);
+pub struct DomainAndPubKey {
+    /// The url that was assigned to the Minecraft server. (ex: <word>-<word>-<word>.mineshare.dev)
+    pub domain: String,
+    /// The server's public key, used for authenticating the server during Diffie Hellman
+    pub public_key: [u8; 32],
+    /// Protocol version for the proxy server, not Minecraft protocol version
+    pub protocol_version: u64,
+}
 
+impl DomainAndPubKey {
+    #[must_use]
+    pub fn new(domain: String, public_key: [u8; 32], protocol_version: u64) -> Self {
+        Self {
+            domain,
+            public_key,
+            protocol_version,
+        }
+    }
+}
+
+/// An IP Address + Port
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Addr(pub SocketAddr);
 
+/// A simple "HELLO" string from server to proxy server to validate that the server is a valid mineshare server
+/// and not a random port 443 connection.
+/// It's probably not very smart to use 443 for something other than HTTPS, but it works so...
 #[derive(Debug, Clone, Encode, BorrowDecode)]
 pub struct ServerHello<'a>(pub &'a str);
 
 impl<'a> BincodeAsync<'a> for ServerHello<'a> {}
-
 impl BincodeAsync<'_> for Message {}
 impl BincodeAsync<'_> for DomainAndPubKey {}
 impl BincodeAsync<'_> for Addr {}
 
+/// Helper trait for serializing & deserializing data into async streams
 pub trait BincodeAsync<'a>: BorrowDecode<'a, ()> + Encode + Send {
+    /// Encode this struct into the stream
     fn encode<S: AsyncWrite + Unpin + Send>(
         self,
         r: &mut S,
@@ -51,6 +82,7 @@ pub trait BincodeAsync<'a>: BorrowDecode<'a, ()> + Encode + Send {
             Ok(len + 4)
         }
     }
+    /// Decode this struct from the stream
     fn parse<S: AsyncRead + Unpin + Send>(
         r: &mut S,
         buf: &'a mut [u8],
@@ -74,6 +106,10 @@ pub trait BincodeAsync<'a>: BorrowDecode<'a, ()> + Encode + Send {
     }
 }
 
+/// Try and parse the hostname from the initial client packet from a Minecraft client to a Minecraft server
+/// Returns `Ok(Some(&[u8]))` if hostname was parsed successfully
+/// Returns `Ok(None)` if it needs more data
+/// Returns `Err(e)` if an error happened or data is malformed
 pub fn try_parse_init_packet(
     buf: &[u8],
     addr: SocketAddr,
@@ -112,7 +148,9 @@ pub fn try_parse_init_packet(
     Ok(Some(hostname))
 }
 
+/// Utilities for encoding and decoding varints
 pub mod varint {
+    /// Encode a u64 as a varint.
     #[must_use]
     pub fn encode_varint(mut value: u64) -> ([u8; 10], usize) {
         let mut index = 0;
@@ -126,7 +164,7 @@ pub mod varint {
         index += 1;
         (buf, index)
     }
-
+    /// Decode a varint from a buffer
     pub fn decode_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, std::io::Error> {
         let mut result = 0;
         for i in 0..10 {
@@ -143,6 +181,7 @@ pub mod varint {
     }
 }
 
+/// An encapsulation of a simple, secure authenticated Diffie Hellman with previous knowledge of a public key.
 pub mod dhauth {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -239,7 +278,8 @@ pub mod dhauth {
                 AlicePubSignature::parse(&mut self.inner, &mut buf).await?;
             let alice_public = PublicKey::from(alice_public);
 
-            // Since the alice and bob public keys should be the same, the hash should also be the same
+            // Since the alice and bob public keys should be the same on alice's side as ours,
+            // the hash should also be the same
             let hashed = sha256(alice_public, bob_public);
 
             // If the hash is the same, then the verification should pass. Otherwise,

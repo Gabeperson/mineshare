@@ -11,7 +11,8 @@ use governor::{
 };
 use mineshare::{
     Addr, BincodeAsync as _, DomainAndPubKey, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
-    ServerHello, dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
+    PROTOCOL_VERSION, ServerHello, dhauth::AuthenticatorProxy, try_parse_init_packet, varint,
+    wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
 use rustls_acme::{AcmeConfig, caches::DirCache};
@@ -306,16 +307,17 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let (mut new_client_recv, prefix) = {
         let (send, recv) = mpsc::channel(10);
         let prefix = router.add_server(send).await;
-        let wrote = match DomainAndPubKey(prefix.clone(), verifying_key.to_bytes())
-            .encode(&mut server_stream, &mut decode_buf)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                info!("Error sending domain to {addr}: {e}");
-                return;
-            }
-        };
+        let wrote =
+            match DomainAndPubKey::new(prefix.clone(), verifying_key.to_bytes(), PROTOCOL_VERSION)
+                .encode(&mut server_stream, &mut decode_buf)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    info!("Error sending domain to {addr}: {e}");
+                    return;
+                }
+            };
         counter.fetch_add(wrote as u64, Ordering::Relaxed);
         (recv, prefix)
     };

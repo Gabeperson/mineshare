@@ -3,7 +3,8 @@
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
 use mineshare::{
-    Addr, BincodeAsync as _, DomainAndPubKey, Message, ServerHello, dhauth::AuthenticatorServer,
+    Addr, BincodeAsync as _, DomainAndPubKey, Message, PROTOCOL_VERSION, ServerHello,
+    dhauth::AuthenticatorServer,
 };
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use std::{net::SocketAddr, sync::Arc};
@@ -50,7 +51,7 @@ async fn async_main() {
     let server_name: ServerName = match args.proxy_server.clone().try_into() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Invalid proxy server domain `{}`: {e}", args.proxy_server);
+            error!("Invalid proxy server domain `{}`: {e}", args.proxy_server);
             std::process::exit(1);
         }
     };
@@ -60,7 +61,7 @@ async fn async_main() {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to create TLS connection with proxy server: {e}");
+            error!("Failed to create TLS connection with proxy server: {e}");
             std::process::exit(1);
         }
     };
@@ -71,18 +72,34 @@ async fn async_main() {
         .encode(&mut proxy_conn, &mut v)
         .await
     {
-        eprintln!("Error sending server hello to proxy server: {e}");
+        error!("Error sending server hello to proxy server: {e}");
     }
     info!("Sent initial hello to proxy server");
     info!("Fetching Url");
-    let DomainAndPubKey(domain, alice_pubkey) =
-        match DomainAndPubKey::parse(&mut proxy_conn, &mut v).await {
-            Ok(d) => d,
-            Err(e) => {
-                error!("Failed to fetch domain from proxy server: {e}");
-                std::process::exit(1);
-            }
-        };
+    let DomainAndPubKey {
+        domain,
+        public_key: alice_pubkey,
+        protocol_version,
+    } = match DomainAndPubKey::parse(&mut proxy_conn, &mut v).await {
+        Ok(d) => d,
+        Err(e) => {
+            error!("Failed to fetch domain from proxy server: {e}");
+            std::process::exit(1);
+        }
+    };
+    if protocol_version != PROTOCOL_VERSION {
+        if protocol_version < PROTOCOL_VERSION {
+            error!(
+                "Server's protocol version is too low! You are on `{PROTOCOL_VERSION}` but server is on `{protocol_version}`! Ask your server maintainer to upgrade if they can!"
+            );
+            std::process::exit(1);
+        } else {
+            error!(
+                "Server's protocol version is too high! You are on `{PROTOCOL_VERSION}` but server is on `{protocol_version}`! Try upgrading your local `mineshare` version and try again!"
+            );
+            std::process::exit(1);
+        }
+    }
     drop(v);
     info!("Fetched Url");
     info!("Proxy url: {domain}");
@@ -277,6 +294,7 @@ async fn handle_duplex(
 }
 
 #[derive(Parser, Debug)]
+#[clap(version, about)]
 struct Args {
     /// The proxy server URL. Leave blank to connect to the default proxy.
     #[arg(long, default_value = DEFAULT_URL)]
