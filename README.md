@@ -84,6 +84,52 @@ Once you exit the mineshare application, all connected players will disconnect. 
 
 ----
 
+## Why shouldn't I use X instead?
+
+By all means, go ahead! I just wanted an open source, publicly available server for people who don't want to
+sign up or go through the effort of setting up a proxy just to play Minecraft with a few friends.
+
+
+That being said, here's a few specific comparisons (to the extent of the knowledge I have of them):
+(these comparisons use free tier as a comparison, because mineshare is also free)
+
+<details>
+<summary>
+<a href="https://github.com/vgskye/e4mc-minecraft-architectury/">e4mc</a>
+</summary>
+
+- mineshare can proxy both LAN and regular servers, whereas e4mc is designed for LAN only (as far as I can tell)
+- mineshare, since it is not a Minecraft mod, can work across versions (same mineshare executable works for 1.8.x to 1.21.x)
+- e4mc is simpler to use
+  - for mineshare, you need to know the ip and port of your server, and need to run the application separately
+  - for e4mc, you just open a LAN server and that's it
+
+</details>
+
+<details>
+<summary>
+<a href="https://ngrok.com/">ngrok</a>
+</summary>
+
+- mineshare is open source
+- mineshare requires no signup
+- mineshare has no total data transfer limit (it does have a bandwidth limit)
+- ngrok supports custom firewall rules
+
+</details>
+
+<details>
+<summary>
+<a href="https://playit.gg/">playit.gg</a>
+</summary>
+
+- mineshare is open source
+- mineshare requires no signup
+- playit.gg supports custom firewall rules
+
+</details>
+
+If you notice any issues with these comparisons, let me know by creating an issue.
 
 ## Public server
 
