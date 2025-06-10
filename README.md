@@ -64,10 +64,7 @@ $ mineshare-<arch> 192.168.1.60:5930
 After starting mineshare, you should see something like this:
 
 ```
-Starting proxy connection
-Proxy connection completed
-Fetching url
-Fetched Url
+<a few lines of details about connecting>
 Proxy url: <word>-<word>-<word>.mineshare.dev
 ```
 
