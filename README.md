@@ -99,7 +99,7 @@ That being said, here's a few specific comparisons (to the extent of the knowled
 - mineshare, since it is not a Minecraft mod, can work across versions (same mineshare executable works for 1.8.x to 1.21.x)
 - e4mc is simpler to use
   - for mineshare, you need to know the ip and port of your server, and need to run the application separately
-  - for e4mc, you just open a LAN server and that's it
+  - for e4mc, you just install the mod, open a LAN server and that's it
 
 </details>
 

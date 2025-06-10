@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Gabeperson"]
 description = "A small, no portforwarding reverse proxy app for small Minecraft servers"
 repository = "https://github.com/Gabeperson/mineshare"
-license = "APACHE-2.0"
+license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
@@ -12,7 +12,7 @@ aes-gcm-siv = "0.11.1"
 bincode = "2.0.1"
 blake3 = "1.8.2"
 clap = { version = "4.5.39", features = ["derive"] }
-ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1.1" }
 governor = "0.10.0"
 rand = "0.9.1"
 rustls = "0.23.27"
