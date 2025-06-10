@@ -1,5 +1,7 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
+// I just like large functions :/
+#![allow(clippy::too_many_lines)]
 
 use clap::Parser;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -10,16 +12,15 @@ use governor::{
     state::{InMemoryState, NotKeyed},
 };
 use mineshare::{
-    Addr, BincodeAsync as _, DomainAndPubKey, LIMIT_BURST, LIMIT_MEGABYTE_PER_SECOND, Message,
-    PROTOCOL_VERSION, ServerHello, dhauth::AuthenticatorProxy, try_parse_init_packet, varint,
-    wordlist,
+    Addr, BincodeAsync as _, DomainAndPubKey, Message, PROTOCOL_VERSION, ServerHello,
+    dhauth::AuthenticatorProxy, try_parse_init_packet, varint, wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
 use rustls_acme::{AcmeConfig, caches::DirCache};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
+    num::{NonZero, NonZeroU32},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -38,7 +39,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_stream::{StreamExt as _, wrappers::TcpListenerStream};
-use tracing::{Level, error, info, instrument, trace, warn};
+use tracing::{Level, error, info, trace, warn};
 
 pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
@@ -69,6 +70,8 @@ async fn async_main() {
         args.prefix,
         args.prod,
         alice_verify_key,
+        Quota::per_second(args.bandwidth_megabyte_per_second)
+            .allow_burst(args.bandwidth_burst_megabyte_per_second),
     )
     .await;
     client_handler(&args.client_socket_addr, router.clone()).await;
@@ -106,7 +109,7 @@ async fn async_main() {
     }
 }
 
-#[instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn server_initial_handler(
     addr: &str,
     counter: Arc<AtomicU64>,
@@ -115,6 +118,7 @@ async fn server_initial_handler(
     prefix: String,
     prod: bool,
     verifying_key: VerifyingKey,
+    quota: Quota,
 ) {
     let addr = format!("{addr}:443");
     let server_listener = match TcpListener::bind(&addr).await {
@@ -149,13 +153,13 @@ async fn server_initial_handler(
                 global_counter,
                 router,
                 verifying_key,
+                quota,
             ));
         }
     });
     info!("Successfully setup server initial connection handler");
 }
 
-#[instrument(skip_all)]
 async fn client_handler(addr: &str, router: Router) {
     let client_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -233,7 +237,6 @@ async fn client_handler(addr: &str, router: Router) {
     info!("Successfully setup client handler");
 }
 
-#[instrument(skip_all)]
 async fn server_play_request_handler(
     addr: &str,
     router: Router,
@@ -287,13 +290,13 @@ async fn server_play_request_handler(
     });
 }
 
-#[instrument(skip_all)]
 async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut server_stream: S,
     addr: SocketAddr,
     counter: Arc<AtomicU64>,
     router: Router,
     verifying_key: VerifyingKey,
+    quota: Quota,
 ) {
     let mut decode_buf = [0u8; 512];
     if receive_server_hello(&mut server_stream, &mut decode_buf)
@@ -437,7 +440,7 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
                         }
                     }
                     info!("Send new client msg to {addr}");
-                    tokio::task::spawn(handle_connect_two(id, recv, clientconn, counter, router2.clone(), abort.clone()));
+                    tokio::task::spawn(handle_connect_two(id, recv, clientconn, counter, router2.clone(), abort.clone(), quota));
                 }
             }
         }
@@ -447,7 +450,6 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     router.remove_prefix(prefix.as_bytes()).await;
 }
 
-#[instrument(skip_all)]
 async fn handle_connect_two(
     id: u128,
     recv: oneshot::Receiver<ServerPlayConn>,
@@ -455,9 +457,9 @@ async fn handle_connect_two(
     counter: Arc<AtomicU64>,
     router: Router,
     abort: Abort,
+    quota: Quota,
 ) {
-    let limiter =
-        Limiter::direct(Quota::per_second(LIMIT_MEGABYTE_PER_SECOND).allow_burst(LIMIT_BURST));
+    let limiter = Limiter::direct(quota);
     let res = tokio::time::timeout(Duration::from_secs(10), recv);
 
     let ServerPlayConn {
@@ -485,7 +487,6 @@ async fn handle_connect_two(
     .await;
 }
 
-#[instrument(skip_all)]
 async fn handle_duplex(
     client_conn: ClientConn,
     server_addr: SocketAddr,
@@ -828,4 +829,12 @@ struct Args {
     /// Whether this should connect to the ACTUAL Lets Encrypt production server
     #[arg(long, default_value_t = false)]
     prod: bool,
+    /// How much bandwidth each connection between client and server should be allowed to have, in MiB/s.
+    /// AKA how much data should each Minecraft connection be allowed to send & receive per second
+    #[arg(long, default_value_t = const { NonZero::new(128*1024).unwrap() })]
+    bandwidth_megabyte_per_second: NonZero<u32>,
+    /// How much *burst* bandwidth each connection between client and server should be allowed to have, in MiB/s.
+    /// AKA the maximum burst that the `bandwidth_megabyte_per_second` should have.
+    #[arg(long, default_value_t = const { NonZero::new(256*1024).unwrap() })]
+    bandwidth_burst_megabyte_per_second: NonZero<u32>,
 }

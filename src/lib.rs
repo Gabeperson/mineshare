@@ -5,14 +5,11 @@
 use bincode::{BorrowDecode, Decode, Encode};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::num::NonZero;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::warn;
 
 pub mod wordlist;
 
-pub const LIMIT_MEGABYTE_PER_SECOND: NonZero<u32> = NonZero::new(128 * 1024).unwrap();
-pub const LIMIT_BURST: NonZero<u32> = NonZero::new(256 * 1024).unwrap();
 pub const PROTOCOL_VERSION: u64 = 1;
 
 /// Messages transferred through the initial TLS stream between proxy and server
