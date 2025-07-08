@@ -68,7 +68,7 @@ async fn async_main() {
     info!("Proxy connection completed");
     info!("Sending initial hello to proxy server");
     let mut v = vec![0u8; 512];
-    if let Err(e) = ServerHello("mineshare")
+    if let Err(e) = ServerHello("mineshare", args.requested_domain.as_deref())
         .encode(&mut proxy_conn, &mut v)
         .await
     {
@@ -102,6 +102,11 @@ async fn async_main() {
     }
     drop(v);
     info!("Fetched Url");
+    if let Some(ref d) = args.requested_domain {
+        if *d != domain {
+            error!("Failed to get requested domain!");
+        }
+    }
     info!("Proxy url: {domain}");
 
     _ = tokio::task::spawn(main_loop(proxy_conn, args, alice_pubkey));
@@ -306,4 +311,8 @@ struct Args {
     proxy_server_play_port: u16,
     /// The MC server that you want to proxy.
     server_socket_addr: String,
+    /// A domain to request the proxy server to assign to us. This can be used as a sort of "static url" for your server.
+    /// Leave blank to get auto-assigned a domain.
+    #[arg(long)]
+    requested_domain: Option<String>,
 }

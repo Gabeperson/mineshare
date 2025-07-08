@@ -10,7 +10,12 @@ Essentially, it lets you _share_ your *mine*craft servers without any setup othe
 By default, the mineshare app will use the public server. If you want to connect to
 a custom server, see the `--help` menu of the app.
 
+#### Note:
+
+It is __highly__ recommended that you setup a whitelist for your server, as strangers are able to join your server!
+
 #### Installation:
+
 <details>
 <summary>Download the appropriate mineshare-&ltarchitecture&gt executable
    from the GitHub releases or via another method.</summary>
@@ -44,6 +49,12 @@ $ mineshare-<arch> <ip-address>:<port>
 ```
 If you are hosting the server on your computer, you will want to use
      `localhost` as your ip.
+
+The `--requested-domain` flag allows you to request a certain URL to be assigned.
+
+```BASH
+$ mineshare-<arch> localhost:25565 --requested-domain ThisIsTheDomainNameToRequest.mineshare.dev
+``` 
 <details>
 <summary> Examples: </summary>
 Hosting on your own computer with port 25565:

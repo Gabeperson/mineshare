@@ -55,7 +55,7 @@ pub struct Addr(pub SocketAddr);
 /// and not a random port 443 connection.
 /// It's probably not very smart to use 443 for something other than HTTPS, but it works so...
 #[derive(Debug, Clone, Encode, BorrowDecode)]
-pub struct ServerHello<'a>(pub &'a str);
+pub struct ServerHello<'a>(pub &'a str, pub Option<&'a str>);
 
 impl<'a> BincodeAsync<'a> for ServerHello<'a> {}
 impl BincodeAsync<'_> for Message {}

@@ -70,8 +70,8 @@ async fn async_main() {
         args.prefix,
         args.prod,
         alice_verify_key,
-        Quota::per_second(args.bandwidth_megabyte_per_second)
-            .allow_burst(args.bandwidth_burst_megabyte_per_second),
+        Quota::per_second(args.bandwidth_byte_per_second)
+            .allow_burst(args.bandwidth_burst_byte_per_second),
     )
     .await;
     client_handler(&args.client_socket_addr, router.clone()).await;
@@ -146,7 +146,6 @@ async fn server_initial_handler(
                 error!("Failed to get peer adrr: {addr}");
                 continue;
             };
-            info!("Received server spawn request from {addr}");
             tokio::task::spawn(server_handler(
                 stream,
                 addr,
@@ -298,18 +297,21 @@ async fn server_handler<S: AsyncRead + AsyncWrite + Unpin + Send>(
     verifying_key: VerifyingKey,
     quota: Quota,
 ) {
+    if router.check_ratelimit(addr.ip()).await {
+        _ = server_stream.shutdown().await;
+        warn!("Rate Limit (SERVER): {}", addr.ip());
+        return;
+    }
     let mut decode_buf = [0u8; 512];
-    if receive_server_hello(&mut server_stream, &mut decode_buf)
-        .await
-        .is_err()
-    {
+    let Ok(requested) = receive_server_hello(&mut server_stream, &mut decode_buf).await else {
         // This isn't a proper server, it's just sending malformed data or isnt sending data at all.
         // So we just ignore them
         return;
-    }
+    };
+    info!("Received server spawn request from {addr}");
     let (mut new_client_recv, prefix) = {
         let (send, recv) = mpsc::channel(10);
-        let prefix = router.add_server(send).await;
+        let prefix = router.add_server(send, requested).await;
         let wrote =
             match DomainAndPubKey::new(prefix.clone(), verifying_key.to_bytes(), PROTOCOL_VERSION)
                 .encode(&mut server_stream, &mut decode_buf)
@@ -654,14 +656,22 @@ impl Router {
         locked.insert(ip, Limiter::direct(self.quota));
         false
     }
-    async fn add_server(&self, send: mpsc::Sender<ClientConn>) -> String {
+    async fn add_server(&self, send: mpsc::Sender<ClientConn>, req: Option<&str>) -> String {
         let mut locked = self.domain_map.write().await;
-        let mut prefix = get_random_prefix(&*locked);
-        prefix.push('.');
-        prefix.push_str(&self.base);
-        locked.insert(prefix.clone().into(), send);
-        trace!("Adding server with prefix {prefix}");
-        prefix
+        let domain = 'blck: {
+            if let Some(s) = req {
+                if s.ends_with(&*self.base) && !locked.contains_key(s.as_bytes()) {
+                    break 'blck s.to_string();
+                }
+            }
+            let mut domain = get_random_prefix(&*locked);
+            domain.push('.');
+            domain.push_str(&self.base);
+            domain
+        };
+        locked.insert(domain.clone().into(), send);
+        trace!("Adding server with domain {domain}");
+        domain
     }
     async fn add_random_id(&self, send: oneshot::Sender<ServerPlayConn>) -> u128 {
         let mut map = self.play_connect_map.write().await;
@@ -747,14 +757,15 @@ fn get_random_id<T>(map: &HashMap<u128, oneshot::Sender<T>>) -> u128 {
     n
 }
 
-async fn receive_server_hello<S: AsyncRead + Unpin + Send>(
+/// Returns requested domain
+async fn receive_server_hello<'a, S: AsyncRead + Unpin + Send>(
     stream: &mut S,
-    buf: &mut [u8],
-) -> Result<(), ()> {
+    buf: &'a mut [u8],
+) -> Result<Option<&'a str>, ()> {
     let fut = ServerHello::parse(stream, buf);
     let fut = tokio::time::timeout(Duration::from_secs(5), fut);
     match fut.await {
-        Ok(Ok(serverhello)) if serverhello.0 == "mineshare" => Ok(()),
+        Ok(Ok(serverhello)) if serverhello.0 == "mineshare" => Ok(serverhello.1),
         _ => Err(()),
     }
 }
@@ -829,12 +840,12 @@ struct Args {
     /// Whether this should connect to the ACTUAL Lets Encrypt production server
     #[arg(long, default_value_t = false)]
     prod: bool,
-    /// How much bandwidth each connection between client and server should be allowed to have, in MiB/s.
+    /// How much bandwidth each connection between client and server should be allowed to have, in B/s.
     /// AKA how much data should each Minecraft connection be allowed to send & receive per second
     #[arg(long, default_value_t = const { NonZero::new(128*1024).unwrap() })]
-    bandwidth_megabyte_per_second: NonZero<u32>,
-    /// How much *burst* bandwidth each connection between client and server should be allowed to have, in MiB/s.
+    bandwidth_byte_per_second: NonZero<u32>,
+    /// How much *burst* bandwidth each connection between client and server should be allowed to have, in B/s.
     /// AKA the maximum burst that the `bandwidth_megabyte_per_second` should have.
     #[arg(long, default_value_t = const { NonZero::new(256*1024).unwrap() })]
-    bandwidth_burst_megabyte_per_second: NonZero<u32>,
+    bandwidth_burst_byte_per_second: NonZero<u32>,
 }
