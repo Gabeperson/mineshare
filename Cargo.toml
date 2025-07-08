@@ -1,6 +1,6 @@
 [package]
 name = "mineshare"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Gabeperson"]
 description = "A small, no portforwarding reverse proxy app for small Minecraft servers"
 repository = "https://github.com/Gabeperson/mineshare"
