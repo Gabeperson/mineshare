@@ -12,7 +12,7 @@ a custom server, see the `--help` menu of the app.
 
 #### Note:
 
-It is __highly__ recommended that you setup a whitelist for your server, as strangers are able to join your server!
+It is __highly__ recommended that you setup a whitelist for your server, as strangers are able to join your server if they find out the ip!
 
 #### Installation:
 
