@@ -10,7 +10,7 @@ use tracing::warn;
 
 pub mod wordlist;
 
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
 /// Messages transferred through the initial TLS stream between proxy and server
 #[derive(Debug, Clone, Encode, Decode)]
