@@ -8,22 +8,15 @@ license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
-aes-gcm-siv = "0.11.1"
-bincode = "2.0.1"
-blake3 = "1.8.2"
 clap = { version = "4.5.39", features = ["derive"] }
-ed25519-dalek = { version = "2.1.1" }
 governor = "0.10.0"
+postcard = "1.1.3"
 rand = "0.9.1"
-rustls = "0.23.27"
-rustls-acme = { version = "0.13.0", features = ["tokio"] }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
-tokio-rustls = "0.26.2"
-tokio-stream = { version = "0.1.17", features = ["net"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-webpki-roots = "1.0.0"
-x25519-dalek = { version = "2.0.1", features = ["getrandom"] }
 
 [[bin]]
 name = "mineshare_server"

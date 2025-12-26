@@ -12,7 +12,7 @@ a custom server, see the `--help` menu of the app.
 
 #### Note:
 
-It is __highly__ recommended that you setup a whitelist for your server, as strangers are able to join your server if they find out the ip!
+It is __highly__ recommended that you setup a whitelist for your server, as strangers are able to join your server if they find out the url!
 
 #### Installation:
 
@@ -50,10 +50,10 @@ $ mineshare-<arch> <ip-address>:<port>
 If you are hosting the server on your computer, you will want to use
      `localhost` as your ip.
 
-The `--requested-domain` flag allows you to request a certain URL to be assigned.
+The `--request-domain` or `-r` flag allows you to request a certain URL to be assigned.
 
 ```BASH
-$ mineshare-<arch> localhost:25565 --requested-domain ThisIsTheDomainNameToRequest.mineshare.dev
+$ mineshare-<arch> localhost:25565 -r ThisIsTheDomainNameToRequest.mineshare.dev
 ``` 
 <details>
 <summary> Examples: </summary>
@@ -162,9 +162,9 @@ which is already set as the default (This means the server will connect to the p
 then you need to proxy anything from `*.<your base domain>`, in this case `*.mineshare.dev`, to your
 server.
 
-Then you open the ports `443`, `25564`, and `25565`.
+Then you open the ports `25563`, `25564`, and `25565`.
 
-Then run the server with the base domain and email info (for LetsEncrypt), and it should start running.
+Then run the server.
 There are also some other utilities in the CLI arguments if you would like to modify some things.
 
 ## How does it work (Technical details)
@@ -172,34 +172,27 @@ There are also some other utilities in the CLI arguments if you would like to mo
 Proxy = mineshare_server*[.EXE]
 Server = mineshare*[.EXE]
 
-The proxy first generates a ed25519 keypair.
-The proxy then starts 3 TCP listeners.
+The proxy starts 3 TCP listeners.
 
 1. Listener for the initial server connection
 2. Listener for client
 3. Listener for server "PLAY" requests
 
-When a server wants to be proxied, it will connect to the initial server connection listener on the proxy
-using raw TCP TLS on port 443. The proxy server assigns a 3-word randomized id to the server
+When a server wants to be proxied, it will connect to the initial server connection listener on the proxy.
+The proxy server assigns a 3-word randomized id, or requested domain if available, to the server
 from the [EFF large word list](https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt) with 7776 words.
-Since there's 3 words, it is HIGHLY unlikely ($\frac{1}{7776^3}$ or ~$`2.13*10^{-10}\%`$ chance per guess) for any malicious users to guess a server id.
-Then the proxy sends this to the server, which will display it. It also sends the ed25519 public key, which is used later for
-authenticating the server.
+Since there's 3 words, it is highly unlikely for any malicious users to guess a server id.
+Then the proxy sends this to the server, which will display it.
 
-Once a client connects to the proxy with this server ID, the proxy parses the "hello" packet for the hostname.
+Once a client connects to the proxy with this server ID, the proxy parses the Minecraft "hello" packet for the hostname.
 Using this hostname, the client is matched to the correct server, and the server is sent a client ID,
 which is a 128-bit randomly generated number.
-The server then initiates another TCP request to the server, this time on a custom port (default 25564), and performs
-an authenticated diffie-hellman exchange using the ed25519 verification key from before.
-Using this shared secret and aes-gcm-siv, it encrypts the 128-bit ID and sends it over.
+The server then initiates another TCP request to the proxy, this time on the "play" port (default 25564).
 
-By doing this, we can ensure that no MITM can happen. See the `dhauth` module in the `src/lib.rs` file for more details
-(Is there an easier & better way of doing this? Probably. But it works, and it's secure, so :shrug:)
-
-The proxy then decrypts this aes-gcm-siv encrypted ID using its own shared secret and connects the client stream and the server stream.
+The proxy then connects the client stream and the server stream.
 The server also creates a connection to the MC server.
 
-Now there is a duplex connection from the client to the MC server, and we can just bidirectionally copy bytes over.
+At this point, the proxy and the server both transparently shuttle bytes back and forth between the client and the Minecraft server.
 
 ## Contributions
 

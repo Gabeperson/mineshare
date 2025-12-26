@@ -1,22 +1,36 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 use clap::Parser;
-use ed25519_dalek::VerifyingKey;
-use mineshare::{
-    Addr, BincodeAsync as _, DomainAndPubKey, Message, PROTOCOL_VERSION, ServerHello,
-    dhauth::AuthenticatorServer,
-};
-use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{net::SocketAddr, sync::Arc};
+use mineshare::{Addr, InitResponse, Message, PROTOCOL_VERSION, ServerHello, StreamHelper as _};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     select,
+    sync::Semaphore,
 };
-use tokio_rustls::TlsConnector;
 use tracing::{Level, error, info};
 
 const DEFAULT_URL: &str = "mc.mineshare.dev";
+
+#[derive(Debug, Clone)]
+struct Abort {
+    inner: Arc<Semaphore>,
+}
+
+impl Abort {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Semaphore::new(0)),
+        }
+    }
+    async fn wait(&self) {
+        _ = self.inner.acquire().await.expect("Should never be closed");
+    }
+    fn abort(&self) {
+        self.inner.add_permits(Semaphore::MAX_PERMITS);
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -28,47 +42,79 @@ async fn async_main() {
         .with_max_level(Level::INFO)
         .init();
     let args = Args::parse();
+
+    tokio::task::spawn(exp_backoff_loop(args));
+    tokio::signal::ctrl_c().await.unwrap();
+}
+
+fn minsec(sec: u64) -> String {
+    if sec <= 60 {
+        format!("{sec}s")
+    } else {
+        format!("{}m{}s", sec / 60, sec % 60)
+    }
+}
+
+async fn exp_backoff_loop(args: Args) {
+    let mut backoff: u64 = 2;
+    let attempts = 8;
+    let mut curr_attempt = 1;
+    loop {
+        match exp_backoff_try(&args).await {
+            Ok(()) => {
+                backoff = 2;
+                curr_attempt = 1;
+            }
+            Err(()) => {
+                backoff *= 2;
+                curr_attempt += 1;
+            }
+        }
+        if curr_attempt > attempts {
+            eprintln!("Failed to establish connection with proxy server. Aborting.");
+            std::process::exit(1);
+        }
+
+        let update_interval = 5;
+        let mut remaining = backoff;
+        while remaining > 0 {
+            let sleep_for = remaining.min(update_interval);
+            eprintln!(
+                "Server connection lost. Retrying in {}",
+                minsec(remaining)
+            );
+            tokio::time::sleep(Duration::from_secs(sleep_for)).await;
+            remaining -= sleep_for;
+        }
+    }
+}
+
+async fn exp_backoff_try(args: &Args) -> Result<(), ()> {
     info!("Starting proxy connection");
-    let proxy_conn = match TcpStream::connect(&format!("{}:443", &args.proxy_server)).await {
-        Ok(l) => l,
-        Err(e) => {
+    let mut proxy_conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&format!(
+        "{}:{}",
+        &args.proxy_server, &args.proxy_server_init_port
+    )))
+    .await
+    {
+        Ok(Ok(l)) => l,
+        Err(_) => {
+            error!(
+                "Failed to connect to proxy server `{}`: Connection timed out",
+                args.proxy_server
+            );
+            return Err(());
+        }
+        Ok(Err(e)) => {
             error!(
                 "Failed to connect to proxy server `{}`: {e}",
                 args.proxy_server
             );
-            std::process::exit(1);
+            return Err(());
         }
     };
-    let root_store = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-    };
-    let mut rustls_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    rustls_config.alpn_protocols = vec![b"mineshare".into()];
-    let rustls_config = Arc::new(rustls_config);
-
-    let server_name: ServerName = match args.proxy_server.clone().try_into() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Invalid proxy server domain `{}`: {e}", args.proxy_server);
-            std::process::exit(1);
-        }
-    };
-    let mut proxy_conn = match TlsConnector::from(rustls_config)
-        .connect(server_name, proxy_conn)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create TLS connection with proxy server: {e}");
-            std::process::exit(1);
-        }
-    };
-    info!("Proxy connection completed");
-    info!("Sending initial hello to proxy server");
     let mut v = vec![0u8; 512];
-    if let Err(e) = ServerHello("mineshare", args.requested_domain.as_deref())
+    if let Err(e) = ServerHello::new(args.request_domain.as_deref())
         .encode(&mut proxy_conn, &mut v)
         .await
     {
@@ -76,11 +122,10 @@ async fn async_main() {
     }
     info!("Sent initial hello to proxy server");
     info!("Fetching Url");
-    let DomainAndPubKey {
+    let InitResponse {
         domain,
-        public_key: alice_pubkey,
         protocol_version,
-    } = match DomainAndPubKey::parse(&mut proxy_conn, &mut v).await {
+    } = match InitResponse::decode(&mut proxy_conn, &mut v).await {
         Ok(d) => d,
         Err(e) => {
             error!("Failed to fetch domain from proxy server: {e}");
@@ -102,59 +147,48 @@ async fn async_main() {
     }
     drop(v);
     info!("Fetched Url");
-    if let Some(ref d) = args.requested_domain {
+    if let Some(ref d) = args.request_domain {
         if *d != domain {
             error!("Failed to get requested domain!");
         }
     }
     info!("Proxy url: {domain}");
-
-    _ = tokio::task::spawn(main_loop(proxy_conn, args, alice_pubkey));
-    tokio::signal::ctrl_c().await.unwrap();
+    main_loop(proxy_conn, args).await;
+    Ok(())
 }
 
-async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(
-    mut conn: S,
-    args: Args,
-    alice_pubkey: [u8; 32],
-) {
-    let pubkey = VerifyingKey::from_bytes(&alice_pubkey).expect("Server send invalid public key?");
+async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(mut conn: S, args: &Args) {
+    let abort = Abort::new();
     let proxy_play: Arc<str> = Arc::from(format!(
         "{}:{}",
         args.proxy_server, args.proxy_server_play_port
     ));
     let mut buf = [0u8; 512];
     loop {
-        let msg = match Message::parse(&mut conn, &mut buf).await {
+        let msg = match Message::decode(&mut conn, &mut buf).await {
             Ok(msg) => msg,
             Err(e) => {
-                error!("Error parsing message send by server: {e}");
-                std::process::exit(1);
+                error!("Error parsing message send by server: {e}. Aborting.");
+                abort.abort();
+                return;
             }
         };
         let id = match msg {
             Message::HeartBeat(data) => {
-                let mut buf = [0u8; 128];
-                if let Err(e) = Message::HeartBeatEcho(data)
-                    .encode(&mut conn, &mut buf)
-                    .await
-                {
+                if let Err(e) = conn.write_all(&data).await {
                     error!("Writing heartbeat echo to server failed: {e}");
-                    std::process::exit(1);
+                    abort.abort();
+                    return;
                 }
                 continue;
-            }
-            Message::HeartBeatEcho(_) => {
-                error!("Proxy server sent ECHO?");
-                std::process::exit(1);
             }
             Message::NewClient(id) => id,
         };
 
         info!("Server sent request with id: {id}");
-        // let addr = args.proxy_server_play.clone();
         let proxy_play = proxy_play.clone();
         let saddr = args.server_socket_addr.clone();
+        let abort = abort.clone();
         tokio::task::spawn(async move {
             info!("Starting proxy PLAY request with id {id}");
             let proxy_stream = TcpStream::connect(&*proxy_play).await;
@@ -162,7 +196,7 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 Ok(s) => s,
                 Err(e) => {
                     error!("Failed to connect to proxy's PLAY port: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             };
             info!("Proxy PLAY connected");
@@ -181,22 +215,18 @@ async fn main_loop<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 Ok(a) => a,
                 Err(e) => {
                     error!("Failed to fetch server's peer addr: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             };
-            let auth = AuthenticatorServer {
-                inner: &mut proxy_stream,
-                alice_public_sign_key: pubkey,
-            };
-            if let Err(e) = auth.send_id(id).await {
+            if let Err(e) = proxy_stream.write_u128(id).await {
                 error!("Failed to send ID to server: {e}");
-                std::process::exit(1);
+                return;
             }
             if let Err(e) = proxy_stream.flush().await {
                 error!("Failed to send ID to server: {e}");
-                std::process::exit(1);
+                return;
             }
-            handle_duplex(proxy_stream, server_addr, server_stream).await;
+            handle_duplex(proxy_stream, server_addr, server_stream, abort).await;
         });
     }
 }
@@ -205,9 +235,10 @@ async fn handle_duplex(
     mut proxy_server_stream: TcpStream,
     mc_server_addr: SocketAddr,
     mut mc_server_stream: TcpStream,
+    abort: Abort,
 ) {
     let mut buf = vec![0u8; 128];
-    let client_addr = match Addr::parse(&mut proxy_server_stream, &mut buf).await {
+    let client_addr = match Addr::decode(&mut proxy_server_stream, &mut buf).await {
         Ok(Addr(client_addr)) => client_addr,
         Err(e) => {
             error!("Failed to read socketaddr from client connection: {e}");
@@ -219,11 +250,15 @@ async fn handle_duplex(
     drop(buf);
     let mut proxy_stream = proxy_server_stream;
     info!("Connected {client_addr} to {mc_server_addr}");
-    info!("Beginning proxying...");
-    let mut buf1 = vec![0u8; 32 * 1024];
-    let mut buf2 = vec![0u8; 32 * 1024];
+    let mut buf1 = vec![0u8; 128 * 1024];
+    let mut buf2 = vec![0u8; 128 * 1024];
     loop {
         select! {
+            _abort = abort.wait() => {
+                _ = proxy_stream.shutdown().await;
+                _ = mc_server_stream.shutdown().await;
+                return;
+            }
             res = proxy_stream.read(&mut buf1) => {
                 match res {
                     Ok(0) => {
@@ -309,10 +344,15 @@ struct Args {
     /// Leave blank to connect to the default port
     #[arg(long, default_value_t = 25564)]
     proxy_server_play_port: u16,
-    /// The MC server that you want to proxy.
+    /// The proxy server's INIT port. This is the port that the host server
+    /// connects to in order to request proxying
+    /// Leave blank to connect to the default port
+    #[arg(long, default_value_t = 25563)]
+    proxy_server_init_port: u16,
+    /// The Minecraft server that you want to proxy.
     server_socket_addr: String,
     /// A domain to request the proxy server to assign to us. This can be used as a sort of "static url" for your server.
     /// Leave blank to get auto-assigned a domain.
-    #[arg(long)]
-    requested_domain: Option<String>,
+    #[arg(short, long)]
+    request_domain: Option<String>,
 }
