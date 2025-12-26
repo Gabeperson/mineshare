@@ -15,7 +15,6 @@ use mineshare::{
     try_parse_init_packet, varint, wordlist,
 };
 use rand::{Rng as _, seq::IndexedRandom as _};
-use tracing::{info, warn};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -37,6 +36,7 @@ use tokio::{
     },
     time::Instant,
 };
+use tracing::{info, warn};
 
 pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
@@ -276,7 +276,7 @@ async fn server_handler(
                             abort.abort();
                             return;
                         },
-                    };
+                    }
                     send_heartbeat_at = Instant::now() + between_heartbeats;
                     timeout_at = Instant::now() + heartbeat_response_time;
                 }
@@ -295,7 +295,7 @@ async fn server_handler(
                             return;
                         };
                     }
-                    if &buf[..data_len] != &data {
+                    if buf[..data_len] != data {
                         info!("Disconnected: {server}. Cause: Invalid heartbeat");
                         abort.abort();
                         return;
@@ -328,6 +328,7 @@ async fn server_handler(
     router.remove_prefix(domain.as_bytes()).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_duplex(
     id: u128,
     server: Arc<str>,
@@ -513,10 +514,11 @@ impl Router {
     async fn add_server(&self, send: mpsc::Sender<ClientConn>, req: Option<&str>) -> String {
         let mut locked = self.domain_map.write().await;
         let domain = 'blck: {
-            if let Some(s) = req {
-                if s.ends_with(&*self.base) && !locked.contains_key(s.as_bytes()) {
-                    break 'blck s.to_string();
-                }
+            if let Some(s) = req
+                && s.ends_with(&*self.base)
+                && !locked.contains_key(s.as_bytes())
+            {
+                break 'blck s.to_string();
             }
             let mut domain = get_random_prefix(&*locked);
             domain.push('.');

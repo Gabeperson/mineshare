@@ -1,4 +1,6 @@
 #![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::missing_errors_doc)]
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -72,6 +74,7 @@ pub struct ServerHello<'a> {
 pub const HELLO_STRING: &str = "mineshare";
 
 impl<'a> ServerHello<'a> {
+    #[must_use]
     pub fn new(requested_domain: Option<&'a str>) -> ServerHello<'a> {
         ServerHello {
             hello_string: HELLO_STRING,

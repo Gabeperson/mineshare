@@ -60,15 +60,12 @@ async fn exp_backoff_loop(args: Args) {
     let attempts = 8;
     let mut curr_attempt = 1;
     loop {
-        match exp_backoff_try(&args).await {
-            Ok(()) => {
-                backoff = 2;
-                curr_attempt = 1;
-            }
-            Err(()) => {
-                backoff *= 2;
-                curr_attempt += 1;
-            }
+        if let Ok(()) = exp_backoff_try(&args).await {
+            backoff = 2;
+            curr_attempt = 1;
+        } else {
+            backoff *= 2;
+            curr_attempt += 1;
         }
         if curr_attempt > attempts {
             eprintln!("Failed to establish connection with proxy server. Aborting.");
@@ -79,10 +76,7 @@ async fn exp_backoff_loop(args: Args) {
         let mut remaining = backoff;
         while remaining > 0 {
             let sleep_for = remaining.min(update_interval);
-            eprintln!(
-                "Server connection lost. Retrying in {}",
-                minsec(remaining)
-            );
+            eprintln!("Server connection lost. Retrying in {}", minsec(remaining));
             tokio::time::sleep(Duration::from_secs(sleep_for)).await;
             remaining -= sleep_for;
         }
@@ -91,10 +85,13 @@ async fn exp_backoff_loop(args: Args) {
 
 async fn exp_backoff_try(args: &Args) -> Result<(), ()> {
     info!("Starting proxy connection");
-    let mut proxy_conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&format!(
-        "{}:{}",
-        &args.proxy_server, &args.proxy_server_init_port
-    )))
+    let mut proxy_conn = match tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(&format!(
+            "{}:{}",
+            &args.proxy_server, &args.proxy_server_init_port
+        )),
+    )
     .await
     {
         Ok(Ok(l)) => l,
@@ -147,10 +144,10 @@ async fn exp_backoff_try(args: &Args) -> Result<(), ()> {
     }
     drop(v);
     info!("Fetched Url");
-    if let Some(ref d) = args.request_domain {
-        if *d != domain {
-            error!("Failed to get requested domain!");
-        }
+    if let Some(ref d) = args.request_domain
+        && *d != domain
+    {
+        error!("Failed to get requested domain!");
     }
     info!("Proxy url: {domain}");
     main_loop(proxy_conn, args).await;
