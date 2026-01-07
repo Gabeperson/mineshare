@@ -392,8 +392,8 @@ async fn handle_duplex(
             .await;
         return;
     }
-    let mut buf1 = vec![0u8; 32 * 1024];
-    let mut buf2 = vec![0u8; 32 * 1024];
+    let mut buf1 = vec![0u8; 128 * 1024];
+    let mut buf2 = vec![0u8; 128 * 1024];
     info!("Client {client_addr} connected to {server}");
     let fut = async move {
         loop {
