@@ -2,7 +2,6 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_unit)]
 
 use mineshare::client_impls::{consts::DEFAULT_URL, *};
 use types::*;

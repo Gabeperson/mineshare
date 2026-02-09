@@ -515,7 +515,7 @@ impl RunningState {
         RunningBoundingBoxes {
             disconnects: disconnect_hitboxes,
             ip_box: ip,
-            players_box: players,
+            players_box: players_inner,
             logs_box: logs,
         }
     }

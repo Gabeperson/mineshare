@@ -599,25 +599,25 @@ impl TuiApp {
                                     let pos = Position::new(event.column, event.row);
                                     if bounding_boxes.players_box.contains(pos) {
                                         let scroll = if state.players.len()
-                                            <= (bounding_boxes.players_box.height - 2) as usize
+                                            <= (bounding_boxes.players_box.height) as usize
                                         {
                                             0
                                         } else {
-                                            (state.scroll_players.saturating_sub(1)).min(
-                                                state.players.len().saturating_sub(
-                                                    bounding_boxes.players_box.height as usize - 2,
-                                                ),
-                                            )
+                                            state.scroll_players.saturating_sub(1)
                                         };
                                         state.scroll_players = scroll;
                                         redraw = true;
                                     } else if bounding_boxes.logs_box.contains(pos) {
                                         let scroll = if state.logs.len()
-                                            <= (bounding_boxes.logs_box.height - 2) as usize
+                                            <= (bounding_boxes.logs_box.height) as usize
                                         {
                                             0
                                         } else {
-                                            state.scroll_logs.saturating_add(1)
+                                            (state.scroll_logs.saturating_add(1)).min(
+                                                state.logs.len().saturating_sub(
+                                                    bounding_boxes.logs_box.height as usize,
+                                                ),
+                                            )
                                         };
                                         state.scroll_logs = scroll;
                                         redraw = true;
@@ -627,13 +627,13 @@ impl TuiApp {
                                     let pos = Position::new(event.column, event.row);
                                     if bounding_boxes.players_box.contains(pos) {
                                         let scroll = if state.players.len()
-                                            <= (bounding_boxes.players_box.height - 2) as usize
+                                            <= (bounding_boxes.players_box.height) as usize
                                         {
                                             0
                                         } else {
                                             (state.scroll_players.saturating_add(1)).min(
                                                 state.players.len().saturating_sub(
-                                                    bounding_boxes.players_box.height as usize - 2,
+                                                    bounding_boxes.players_box.height as usize,
                                                 ),
                                             )
                                         };
@@ -641,7 +641,7 @@ impl TuiApp {
                                         redraw = true;
                                     } else if bounding_boxes.logs_box.contains(pos) {
                                         let scroll = if state.logs.len()
-                                            <= (bounding_boxes.logs_box.height - 2) as usize
+                                            <= (bounding_boxes.logs_box.height) as usize
                                         {
                                             0
                                         } else {
