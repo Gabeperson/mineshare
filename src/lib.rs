@@ -1,12 +1,17 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::missing_errors_doc)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::similar_names)]
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod client_impls;
 pub mod wordlist;
 
 pub const PROTOCOL_VERSION: u64 = 3;
