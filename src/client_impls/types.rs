@@ -39,8 +39,9 @@ pub enum ServerEvent {
     Stopped,
     Url(String),
     DidntGetRequestedUrl(String),
-    PlayerConnected(SocketAddr),
-    PlayerDisconnected(SocketAddr),
+    PlayerConnected(SocketAddr, String),
+    PlayerDisconnected(SocketAddr, String),
+    Pinged(SocketAddr),
 }
 #[derive(Debug)]
 pub enum UiEvent {
@@ -86,13 +87,14 @@ pub struct MainMenuPermanentState {
 #[derive(Debug, Hash, PartialEq, Eq, Ord, PartialOrd)]
 pub struct PlayerInfo {
     pub addr: SocketAddr,
+    pub username: String,
 }
 
 #[derive(Debug)]
 pub struct RunningState {
     pub ip: String,
     pub players: VecDeque<PlayerInfo>,
-    pub logs: VecDeque<(jiff::Timestamp, String)>,
+    pub logs: VecDeque<(jiff::Zoned, String)>,
     pub scroll_players: usize,
     pub scroll_logs: usize,
     pub copied: bool,
@@ -236,6 +238,7 @@ pub struct EditableTextBox<'a> {
     pub cursor: Cursor,
     pub mouse_position: Position,
     pub rect: Rect,
+    pub suffix: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-pub const DEFAULT_URL: &str = "mc.mineshare.dev";
+pub const DEFAULT_URL: &str = "na.mineshare.dev";
 pub const CANCEL: &str = " Cancel ";
 pub const ADVANCED: &str = " Advanced ";
 pub const START: &str = "Start";

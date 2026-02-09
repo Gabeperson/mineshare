@@ -254,8 +254,11 @@ async fn handle_duplex(
     send_client: flume::Sender<ClientStatusUpdate>,
 ) {
     let mut buf = vec![0u8; 128];
-    let client_addr = match Addr::decode(&mut proxy_stream, &mut buf).await {
-        Ok(Addr(client_addr)) => client_addr,
+    let (client_addr, username) = match Addr::decode(&mut proxy_stream, &mut buf).await {
+        Ok(Addr {
+            addr: client_addr,
+            username,
+        }) => (client_addr, username),
         Err(e) => {
             _ = send
                 .send_async(ServerEvent::ServerNonCatastrophicError(format!(
@@ -268,24 +271,31 @@ async fn handle_duplex(
         }
     };
     drop(buf);
-    _ = send_client
-        .send_async(ClientStatusUpdate::Connected {
-            addr: client_addr,
-            token: cancel.clone(),
-        })
-        .await;
-    _ = send
-        .send_async(ServerEvent::PlayerConnected(client_addr))
-        .await;
+    if let Some(username) = &username {
+        _ = send_client
+            .send_async(ClientStatusUpdate::Connected {
+                addr: client_addr,
+                token: cancel.clone(),
+            })
+            .await;
+        _ = send
+            .send_async(ServerEvent::PlayerConnected(client_addr, username.clone()))
+            .await;
+    } else {
+        _ = send.send_async(ServerEvent::Pinged(client_addr)).await;
+    }
+
     select! {
         _cancel = cancel.cancelled() => {
             _ = proxy_stream.shutdown().await;
             _ = mc_server_stream.shutdown().await;
         }
-        _res = tokio::io::copy_bidirectional_with_sizes(&mut proxy_stream, &mut mc_server_stream, 32*1024, 32*1024) => {}
+        _res = tokio::io::copy_bidirectional(&mut proxy_stream, &mut mc_server_stream) => {}
     }
-    _ = send
-        .send_async(ServerEvent::PlayerDisconnected(client_addr))
-        .await;
+    if let Some(username) = username {
+        _ = send
+            .send_async(ServerEvent::PlayerDisconnected(client_addr, username))
+            .await;
+    }
     _ = send_client.send(ClientStatusUpdate::Disconnected { addr: client_addr });
 }

@@ -18,7 +18,7 @@ use rand::{Rng as _, seq::IndexedRandom as _};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    num::{NonZero, NonZeroU32},
+    num::NonZeroU32,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -59,8 +59,6 @@ async fn async_main() {
         &args.server_socket_addr,
         global_counter.clone(),
         router.clone(),
-        Quota::per_second(args.bandwidth_byte_per_second)
-            .allow_burst(args.bandwidth_burst_byte_per_second),
     )
     .await;
     client_handler(&args.client_socket_addr, router.clone()).await;
@@ -98,7 +96,7 @@ async fn async_main() {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Router, quota: Quota) {
+async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Router) {
     let server_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -111,7 +109,7 @@ async fn server_initial_handler(addr: &str, counter: Arc<AtomicU64>, router: Rou
             let (stream, addr) = server_listener.accept().await.expect("Failed to listen");
             let global_counter = counter.clone();
             let router = router.clone();
-            tokio::task::spawn(server_handler(stream, addr, global_counter, router, quota));
+            tokio::task::spawn(server_handler(stream, addr, global_counter, router));
         }
     });
 }
@@ -130,8 +128,7 @@ async fn client_handler(addr: &str, router: Router) {
             let router = router.clone();
             tokio::task::spawn(async move {
                 let (mut stream, addr) = accepted;
-                let mut data = vec![0u8; 2048];
-                let mut cursor = 0;
+                let mut data = Vec::new();
                 if router.check_ratelimit(addr.ip()).await {
                     _ = DisconnectMessage("You have been rate limited")
                         .encode(&mut stream)
@@ -139,29 +136,23 @@ async fn client_handler(addr: &str, router: Router) {
                     return;
                 }
                 let fut = async {
-                    loop {
-                        match stream.read(&mut data[cursor..]).await {
-                            Ok(v) => {
-                                cursor += v;
-                            }
-                            Err(_e) => {
-                                return Err(());
-                            }
-                        }
-                        let domain = match try_parse_init_packet(&data[..cursor]) {
-                            Ok(Some(v)) => v,
-                            Ok(None) => {
-                                continue;
-                            }
+                    let (domain, username) =
+                        match try_parse_init_packet(&mut stream, &mut data).await {
+                            Ok(v) => v,
                             Err(_e) => return Err(()),
                         };
-                        if let Some(sender) = router.get_domain(domain).await {
-                            data.truncate(cursor);
-                            _ = sender.send(ClientConn { stream, data, addr }).await;
-                            return Ok(());
-                        }
-                        return Err(());
+                    if let Some(sender) = router.get_domain(domain.as_bytes()).await {
+                        _ = sender
+                            .send(ClientConn {
+                                stream,
+                                data,
+                                addr,
+                                username,
+                            })
+                            .await;
+                        return Ok::<(), ()>(());
                     }
+                    Ok(())
                 };
                 let timeout = tokio::time::timeout(Duration::from_secs(5), fut);
                 _ = timeout.await;
@@ -209,7 +200,6 @@ async fn server_handler(
     addr: SocketAddr,
     counter: Arc<AtomicU64>,
     router: Router,
-    quota: Quota,
 ) {
     if router.check_ratelimit(addr.ip()).await {
         warn!("Rate limited: {}", addr.ip());
@@ -319,7 +309,7 @@ async fn server_handler(
                             return;
                         }
                     }
-                    tokio::task::spawn(handle_duplex(id, server.clone(), recv, clientconn, counter, router2.clone(), quota, abort.clone()));
+                    tokio::task::spawn(handle_duplex(id, server.clone(), recv, clientconn, counter, router2.clone(), abort.clone()));
                 }
             }
         }
@@ -336,10 +326,8 @@ async fn handle_duplex(
     mut client_conn: ClientConn,
     counter: Arc<AtomicU64>,
     router: Router,
-    quota: Quota,
     abort: Abort,
 ) {
-    let limiter = Limiter::direct(quota);
     let res = tokio::time::timeout(Duration::from_secs(10), recv);
 
     let ServerPlayConn {
@@ -365,9 +353,16 @@ async fn handle_duplex(
         stream: mut client_stream,
         data,
         addr: client_addr,
+        username,
     } = client_conn;
     let mut buf = vec![0u8; 128];
-    match Addr(client_addr).encode(&mut server_stream, &mut buf).await {
+    match (Addr {
+        addr: client_addr,
+        username,
+    })
+    .encode(&mut server_stream, &mut buf)
+    .await
+    {
         Ok(len) => {
             counter.fetch_add(len as u64, Ordering::Relaxed);
         }
@@ -392,88 +387,14 @@ async fn handle_duplex(
             .await;
         return;
     }
-    let mut buf1 = vec![0u8; 128 * 1024];
-    let mut buf2 = vec![0u8; 128 * 1024];
     info!("Client {client_addr} connected to {server}");
     let fut = async move {
-        loop {
-            select! {
-                _aborted = abort.wait() => {
-                    _ = client_stream.shutdown().await;
-                    _ = server_stream.shutdown().await;
-                    return;
-                }
-                res = client_stream.read(&mut buf1) => {
-                    match res {
-                        Ok(0) => {
-                            return;
-                        }
-                        Ok(amt) => {
-                            limiter
-                                .until_n_ready(NonZeroU32::new(amt as u32).unwrap())
-                                .await
-                                .expect("Buffer size < Burst quota");
-                            counter.fetch_add(amt as u64, Ordering::Relaxed);
-                            if let Err(_e) = server_stream.write_all(&buf1[..amt]).await {
-                                // If one of the connections errors, we should abort the other one too.
-                                // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                                _ = client_stream.shutdown().await;
-                                _ = server_stream.shutdown().await;
-                                return;
-                            }
-                            if let Err(_e) = server_stream.flush().await {
-                                // If one of the connections errors, we should abort the other one too.
-                                // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                                _ = client_stream.shutdown().await;
-                                _ = server_stream.shutdown().await;
-                                return;
-                            }
-                        },
-                        Err(_e) => {
-                            // If one of the connections errors, we should abort the other one too.
-                            // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                            _ = client_stream.shutdown().await;
-                            _ = server_stream.shutdown().await;
-                            return;
-                        },
-                    }
-                }
-                res = server_stream.read(&mut buf2) => {
-                    match res {
-                        Ok(0) => {
-                            return;
-                        }
-                        Ok(amt) => {
-                            limiter
-                                .until_n_ready(NonZeroU32::new(amt as u32).unwrap())
-                                .await
-                                .expect("Buffer size < Burst quota");
-                            counter.fetch_add(amt as u64, Ordering::Relaxed);
-                            if let Err(_e) = client_stream.write_all(&buf2[..amt]).await {
-                                // If one of the connections errors, we should abort the other one too.
-                                // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                                _ = server_stream.shutdown().await;
-                                _ = client_stream.shutdown().await;
-                                return;
-                            }
-                            if let Err(_e) = client_stream.flush().await {
-                                // If one of the connections errors, we should abort the other one too.
-                                // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                                _ = server_stream.shutdown().await;
-                                _ = client_stream.shutdown().await;
-                                return;
-                            }
-                        },
-                        Err(_e) => {
-                            // If one of the connections errors, we should abort the other one too.
-                            // We ignore the returned results because there's nothing we can do if the disconnection fails.
-                            _ = server_stream.shutdown().await;
-                            _ = client_stream.shutdown().await;
-                            return;
-                        },
-                    }
-                }
+        select! {
+            _aborted = abort.wait() => {
+                _ = client_stream.shutdown().await;
+                _ = server_stream.shutdown().await;
             }
+            _res = tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream) => {}
         }
     };
     fut.await;
@@ -556,6 +477,7 @@ struct ClientConn {
     stream: TcpStream,
     data: Vec<u8>,
     addr: SocketAddr,
+    username: Option<String>,
 }
 
 #[derive(Debug)]
@@ -680,12 +602,4 @@ struct Args {
     /// The burst limit for each IP address. This is the MAX # of burst connections that can be made from each IP in a second.
     #[arg(long, default_value = "10")]
     rate_limit_burst: NonZeroU32,
-    /// How much bandwidth each connection between client and server should be allowed to have, in B/s.
-    /// AKA how much data should each Minecraft connection be allowed to send & receive per second
-    #[arg(long, default_value_t = const { NonZero::new(128*1024).unwrap() })]
-    bandwidth_byte_per_second: NonZero<u32>,
-    /// How much *burst* bandwidth each connection between client and server should be allowed to have, in B/s.
-    /// AKA the maximum burst that the `bandwidth_megabyte_per_second` should have.
-    #[arg(long, default_value_t = const { NonZero::new(256*1024).unwrap() })]
-    bandwidth_burst_byte_per_second: NonZero<u32>,
 }

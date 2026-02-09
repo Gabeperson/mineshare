@@ -2,8 +2,8 @@ use super::consts::*;
 use super::types::*;
 use crate::PROTOCOL_VERSION;
 
-use flume::{RecvTimeoutError, Selector};
-use jiff::Timestamp;
+use flume::Selector;
+use jiff::Zoned;
 use rand::Rng as _;
 use ratatui::{
     crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind},
@@ -82,22 +82,42 @@ impl TuiApp {
                 };
                 let mut redraw = false;
                 loop {
-                    let event = match self.recv_terminal_ev.recv_deadline(frame_end_time) {
+                    enum EventRecv {
+                        Terminal(ratatui::crossterm::event::Event),
+                        ServerList(ServerInfo),
+                    }
+                    let selector = Selector::new()
+                        .recv(&state.servers_recv.0, |r| {
+                            r.map_err(|_| ()).map(EventRecv::ServerList)
+                        })
+                        .recv(&self.recv_terminal_ev, |r| {
+                            r.map_err(|_| ()).map(EventRecv::Terminal)
+                        });
+                    let event = match selector.wait_deadline(frame_end_time) {
                         Ok(e) => e,
-                        Err(RecvTimeoutError::Timeout) => {
+                        Err(_timeout) => {
                             if redraw {
                                 break;
                             }
                             frame_end_time = Instant::now() + TICK_LEN;
                             continue;
                         }
-                        Err(RecvTimeoutError::Disconnected) => {
-                            // If terminal polling failed, something has gone terribly wrong
-                            return false;
+                    };
+                    let Ok(event) = event else {
+                        // If one of the terminal ev or server ev channels is disconnected
+                        // it means something's gone terribly wrong
+                        return false;
+                    };
+                    let term_event = match event {
+                        EventRecv::Terminal(event) => event,
+                        EventRecv::ServerList(server_info) => {
+                            state.servers.push(server_info);
+                            redraw = true;
+                            continue;
                         }
                     };
                     let res = Self::handle_menu_event(
-                        event,
+                        term_event,
                         &mut self.permanent_state,
                         &mut self.mouse_pos,
                         state,
@@ -125,9 +145,6 @@ impl TuiApp {
                         }
                         MainMenuEventResult::Ok => (),
                     }
-                }
-                while let Ok(server_info) = state.servers_recv.0.try_recv() {
-                    state.servers.push(server_info);
                 }
             }
             RenderResult::Loading {
@@ -203,11 +220,11 @@ impl TuiApp {
                                 ServerEvent::InvalidProtocolVersion(protocol_version) => {
                                     let msg = if protocol_version > PROTOCOL_VERSION {
                                         format!(
-                                            "Protocol version too low! You are on {PROTOCOL_VERSION} but proxy is on {protocol_version}"
+                                            "Protocol version too low! You are on {PROTOCOL_VERSION} but proxy is on {protocol_version}. You may want to update mineshare."
                                         )
                                     } else {
                                         format!(
-                                            "Protocol version too high! You are on {PROTOCOL_VERSION} but proxy is on {protocol_version}"
+                                            "Protocol version too high! You are on {PROTOCOL_VERSION} but proxy is on {protocol_version}. You may want to ask the proxy server maintainer to update the proxy version."
                                         )
                                     };
                                     self.app_state = TuiAppState::Failed(FailedState {
@@ -233,9 +250,10 @@ impl TuiApp {
                                 }
                                 ServerEvent::ServerNonCatastrophicError(_)
                                 | ServerEvent::MCServerConnectionFailed(_)
-                                | ServerEvent::PlayerConnected(_)
-                                | ServerEvent::PlayerDisconnected(_)
-                                | ServerEvent::Stopped => {
+                                | ServerEvent::PlayerConnected(_, _)
+                                | ServerEvent::PlayerDisconnected(_, _)
+                                | ServerEvent::Stopped
+                                | ServerEvent::Pinged(_) => {
                                     // These events shouldn't get send while connecting, but we might have built up events from
                                     // the previous connection, so we don't do a unreachable!() so we don't crash in that case
                                 }
@@ -493,7 +511,7 @@ impl TuiApp {
                                     return true;
                                 }
                                 ServerEvent::MCServerConnectionFailed(msg) => {
-                                    state.logs.push_front((Timestamp::now(), format!("Failed to connect to Minecraft server: {msg}. Is the MC server up?")));
+                                    state.logs.push_front((Zoned::now(), format!("Failed to connect to Minecraft server: {msg}. Is the MC server up?")));
                                     if state.logs.len() > 100 {
                                         state.logs.pop_back();
                                     }
@@ -502,27 +520,36 @@ impl TuiApp {
                                 ServerEvent::ServerNonCatastrophicError(msg) => {
                                     state
                                         .logs
-                                        .push_front((Timestamp::now(), format!("Error: {msg}")));
+                                        .push_front((Zoned::now(), format!("Error: {msg}")));
                                     if state.logs.len() > 100 {
                                         state.logs.pop_back();
                                     }
                                     redraw = true;
                                 }
-                                ServerEvent::PlayerConnected(addr) => {
+                                ServerEvent::PlayerConnected(addr, username) => {
                                     state.logs.push_front((
-                                        Timestamp::now(),
-                                        format!("{addr} connected"),
+                                        Zoned::now(),
+                                        format!("{username} ({addr}) connected"),
                                     ));
                                     if state.logs.len() > 100 {
                                         state.logs.pop_back();
                                     }
-                                    state.players.push_back(PlayerInfo { addr });
+                                    state.players.push_back(PlayerInfo { addr, username });
                                     redraw = true;
                                 }
-                                ServerEvent::PlayerDisconnected(addr) => {
+                                ServerEvent::Pinged(addr) => {
+                                    state
+                                        .logs
+                                        .push_front((Zoned::now(), format!("Ping from {addr}")));
+                                    if state.logs.len() > 100 {
+                                        state.logs.pop_back();
+                                    }
+                                    redraw = true;
+                                }
+                                ServerEvent::PlayerDisconnected(addr, username) => {
                                     state.logs.push_front((
-                                        Timestamp::now(),
-                                        format!("{addr} disconnected"),
+                                        Zoned::now(),
+                                        format!("{username} ({addr}) disconnected"),
                                     ));
                                     if state.logs.len() > 100 {
                                         state.logs.pop_back();
@@ -701,7 +728,7 @@ impl TuiApp {
         let request_domain = if request_domain.is_empty() {
             None
         } else {
-            Some(request_domain.clone())
+            Some(format!("{request_domain}.{proxy_server}"))
         };
         Ok(ConnectOptions {
             proxy_server: proxy_server.clone(),

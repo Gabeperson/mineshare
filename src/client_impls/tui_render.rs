@@ -27,14 +27,25 @@ impl EditableTextBox<'_> {
                 Style::new()
             });
         frame.render_widget(&block, self.rect);
-        let paragraph = Paragraph::new(self.content);
+        let mut text = Text::default();
+        text.push_span(self.content);
+        if let Some(suffix) = self.suffix {
+            text.push_span(Span::styled(".", Style::new().dark_gray()));
+            text.push_span(Span::styled(suffix, Style::new().dark_gray()));
+        }
+        let paragraph = Paragraph::new(text);
         frame.render_widget(&paragraph, inner_rect);
         if self.selected {
             // Using default terminal cursor here bugs out windows terminal so we have to
             // use a custom cursor :(
             match self.cursor {
                 Cursor::Position(cursor) => {
-                    let cursor_content = self.content.get(cursor..cursor + 1).unwrap_or(" ");
+                    let cursor_content = self.content.get(cursor..cursor + 1).unwrap_or(match self
+                        .suffix
+                    {
+                        Some(_suffix) => ".",
+                        None => " ",
+                    });
                     let paragraph =
                         Paragraph::new(cursor_content).style(Style::new().black().on_green());
                     let area = Rect::new(inner_rect.left() + cursor as u16, inner_rect.top(), 1, 1);
@@ -133,15 +144,22 @@ impl MainMenuTemporaryState {
             cursor: self.cursor,
             mouse_position: pos,
             rect: server_ip_rect,
+            suffix: None,
         }
         .render(frame);
+        let is_empty = perm_state.request_domain.is_empty();
         EditableTextBox {
-            title: " Requested Domain (Optional) (Ex: test.mineshare.dev)",
+            title: " Requested Domain (Optional)",
             content: &perm_state.request_domain,
             selected: self.selected == SelectedBlock::RequestedDomain,
             cursor: self.cursor,
             mouse_position: pos,
             rect: request_domain_rect,
+            suffix: if is_empty {
+                None
+            } else {
+                Some(perm_state.proxy_server.as_str())
+            },
         }
         .render(frame);
 
@@ -175,7 +193,7 @@ impl MainMenuTemporaryState {
             let mut line1 = Line::default();
             line1.push_span(Span::styled("Lan Server", Style::new().light_blue()));
             line1.push_span(Span::raw(" - "));
-            line1.push_span(Span::styled(&*info.ip, Style::new().light_green()));
+            line1.push_span(Span::styled(info.ip.as_str(), Style::new().light_green()));
             if self.last_selected_server == Some(i) {
                 line1.push_span(Span::styled(
                     " - Set as server IP!",
@@ -183,7 +201,7 @@ impl MainMenuTemporaryState {
                 ));
             }
             text.push_line(line1);
-            text.push_line(Line::styled(&*info.motd, Style::new().white()));
+            text.push_line(Line::styled(info.motd.as_str(), Style::new().white()));
             text
         });
         let layout_it = self
@@ -230,6 +248,7 @@ impl MainMenuTemporaryState {
                 cursor: self.cursor,
                 mouse_position: pos,
                 rect: proxy_ip,
+                suffix: None,
             }
             .render(frame);
             EditableTextBox {
@@ -239,6 +258,7 @@ impl MainMenuTemporaryState {
                 cursor: self.cursor,
                 mouse_position: pos,
                 rect: play_port,
+                suffix: None,
             }
             .render(frame);
             EditableTextBox {
@@ -248,6 +268,7 @@ impl MainMenuTemporaryState {
                 cursor: self.cursor,
                 mouse_position: pos,
                 rect: init_port,
+                suffix: None,
             }
             .render(frame);
             Some(AdvancedBoxes {
@@ -266,7 +287,7 @@ impl MainMenuTemporaryState {
         if !self.errors.is_empty() {
             let mut text = Text::default();
             for error in &self.errors {
-                text.push_line(&**error);
+                text.push_line(error.as_str());
             }
             let error_paragraph = Paragraph::new(text).style(Style::new().red());
             frame.render_widget(error_paragraph, err_rect);
@@ -425,7 +446,10 @@ impl RunningState {
         frame.render_widget(para, help_area);
         let pos = Position::new(mouse_pos.0, mouse_pos.1);
         let [left, right] = area
-            .try_layout(&Layout::horizontal([Constraint::Fill(1); 2]))
+            .try_layout(&Layout::horizontal([
+                Constraint::Percentage(45),
+                Constraint::Percentage(55),
+            ]))
             .unwrap();
         let [ip, players] = left
             .try_layout(&Layout::vertical([
@@ -442,11 +466,11 @@ impl RunningState {
         };
         let ip_para = if self.copied {
             let mut text = Text::default();
-            text.push_span(Span::raw(&*self.ip));
+            text.push_span(Span::raw(self.ip.as_str()));
             text.push_span(Span::styled(" - Copied ", Style::new().cyan()));
             Paragraph::new(text)
         } else {
-            Paragraph::new(&*self.ip)
+            Paragraph::new(self.ip.as_str())
         };
         let ip_para = ip_para.block(Block::bordered().title(" Server IP ").style(ip_style));
         frame.render_widget(ip_para, ip);
@@ -477,7 +501,7 @@ impl RunningState {
                 )
                 .unwrap();
             disconnect_hitboxes.push((info.addr, disconnect));
-            let name_str = "TEST";
+            let name_str = info.username.as_str();
             let name_para = Paragraph::new(name_str);
             let addr_para = Paragraph::new(info.addr.to_string());
             let disconnect_style = if disconnect.contains(pos) {
@@ -498,16 +522,15 @@ impl RunningState {
             logs_rect.height -= 1;
             rects.push(r);
         }
-        for ((timestamp, log), rect) in self.logs.range(self.scroll_logs..).zip(rects.iter().rev())
-        {
+        for ((zoned, log), rect) in self.logs.range(self.scroll_logs..).zip(rects.iter().rev()) {
             let [time_rect, log_rect] = rect
                 .try_layout(
                     &Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)])
                         .spacing(Spacing::Space(2)),
                 )
                 .unwrap();
-            let time_para = Paragraph::new(timestamp.to_string());
-            let log_para = Paragraph::new(&**log);
+            let time_para = Paragraph::new(format!("{}", zoned.datetime()));
+            let log_para = Paragraph::new(log.as_str());
             frame.render_widget(time_para, time_rect);
             frame.render_widget(log_para, log_rect);
         }
