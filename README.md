@@ -2,7 +2,7 @@
 
 mineshare is a simple, no portforwarding proxy app for small Minecraft servers (1.8.x-1.21.x)
 
-Essentially, it lets you _share_ your *mine*craft servers without any setup other than running one executable.
+Essentially, it lets you _share_ your *mine*craft servers (Including LAN worlds!) without any setup other than running one executable.
 (People who join your server don't need to download anything!)
 
 ## Basic Usage:
