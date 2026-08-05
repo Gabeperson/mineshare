@@ -282,14 +282,13 @@ impl TuiApp {
                                             return true;
                                         }
                                     }
-                                    KeyCode::Char(c) => {
-                                        if c == 'q'
+                                    KeyCode::Char(c)
+                                        if (c == 'q'
                                             || (c == 'c'
-                                                && event.modifiers.contains(KeyModifiers::CONTROL))
-                                        {
+                                                && event.modifiers.contains(KeyModifiers::CONTROL)))
+                                        => {
                                             return false;
                                         }
-                                    }
                                     _ => {}
                                 }
                             }
@@ -412,14 +411,13 @@ impl TuiApp {
                                         return true;
                                     }
                                 },
-                                KeyCode::Char(c) => {
-                                    if c == 'q'
+                                KeyCode::Char(c)
+                                    if (c == 'q'
                                         || (c == 'c'
-                                            && event.modifiers.contains(KeyModifiers::CONTROL))
-                                    {
+                                            && event.modifiers.contains(KeyModifiers::CONTROL)))
+                                    => {
                                         return false;
                                     }
-                                }
                                 _ => {}
                             }
                         }

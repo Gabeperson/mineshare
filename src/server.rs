@@ -70,7 +70,7 @@ async fn async_main() {
     .await;
     // Megabytes
     let max_network = args.max_network * 1024 * 1024;
-    let every = Duration::from_secs(1800);
+    let every = Duration::from_mins(30);
     let mut check = Instant::now() + every;
     println!("Successfully setup listeners!");
     loop {
@@ -165,7 +165,7 @@ async fn server_play_request_handler(addr: &str, router: Router, counter: Arc<At
     let server_play_listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to start listening on server play addr `{addr}`: {e}",);
+            eprintln!("Failed to start listening on server play addr `{addr}`: {e}");
             std::process::exit(1);
         }
     };
